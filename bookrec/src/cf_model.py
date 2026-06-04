@@ -1,0 +1,107 @@
+"""
+Collaborative filtering + a popularity baseline.
+
+Same `surprise` building blocks as the Week-3 class notebook (KNNBasic UBCF/IBCF,
+BaselineOnly), plus SVD, plus a non-personalized popularity/mean baseline. Every
+model exposes a uniform .predict(user, book) and .predict_for_user(user, ids).
+
+`surprise` is imported lazily so the popularity baseline (and the content/LLM
+paths) still run where the compiled scikit-surprise wheel isn't installed.
+"""
+from __future__ import annotations
+
+import pandas as pd
+
+RATING_SCALE = (1.0, 5.0)   # this dataset uses 1..5 stars
+
+
+def _require_surprise():
+    try:
+        import surprise  # noqa: F401
+        return surprise
+    except Exception as e:  # pragma: no cover
+        raise ImportError(
+            "scikit-surprise is needed for collaborative filtering.\n"
+            "  pip install 'numpy<2.0' && pip install scikit-surprise\n"
+            "  (or: conda install -c conda-forge scikit-surprise)\n"
+            f"original error: {e}"
+        )
+
+
+def build_dataset(ratings: pd.DataFrame):
+    """Wrap a [user_id, book_id, rating] frame as a Surprise Dataset."""
+    surprise = _require_surprise()
+    reader = surprise.Reader(rating_scale=RATING_SCALE)
+    return surprise.Dataset.load_from_df(
+        ratings[["user_id", "book_id", "rating"]], reader)
+
+
+def make_model(kind: str = "svd", k: int = 20):
+    """Factory: 'svd', 'ubcf' (user-based, Pearson), 'ibcf' (item-based, cosine),
+    'baseline' (global + user + item means)."""
+    surprise = _require_surprise()
+    if kind == "svd":
+        return surprise.SVD(n_factors=50, n_epochs=20, random_state=6604)
+    if kind == "ubcf":
+        return surprise.KNNBasic(k=k, sim_options={"name": "pearson", "user_based": True},
+                                 verbose=False)
+    if kind == "ibcf":
+        return surprise.KNNBasic(k=k, sim_options={"name": "cosine", "user_based": False},
+                                 verbose=False)
+    if kind == "baseline":
+        return surprise.BaselineOnly(verbose=False)
+    raise ValueError(f"unknown kind: {kind!r}")
+
+
+class PopularityModel:
+    """Non-personalized popularity/mean baseline - the benchmark CF must beat.
+
+    Pure Python (no surprise), so it always runs. For RMSE it predicts each
+    book's mean rating, shrunk toward the global mean for thinly-rated books;
+    for Top-N it ranks by that popularity score.
+    """
+
+    def __init__(self, shrinkage: int = 10):
+        self.shrinkage = shrinkage
+        self.global_mean = 3.5
+        self.book_mean = {}
+
+    def fit(self, ratings: pd.DataFrame):
+        self.global_mean = float(ratings["rating"].mean())
+        g = ratings.groupby("book_id")["rating"]
+        means, counts = g.mean(), g.count()
+        # Bayesian-shrunk mean: pull low-count books toward the global mean
+        shrunk = (counts * means + self.shrinkage * self.global_mean) / (counts + self.shrinkage)
+        self.book_mean = shrunk.to_dict()
+        return self
+
+    def predict(self, user_id, book_id) -> float:
+        return self.book_mean.get(book_id, self.global_mean)
+
+    def predict_for_user(self, user_id, book_ids) -> pd.Series:
+        est = [self.predict(user_id, b) for b in book_ids]
+        return pd.Series(est, index=list(book_ids), name="pop_score")
+
+
+class CFModel:
+    """Uniform wrapper: train, then .predict(user, book) -> estimated rating."""
+
+    def __init__(self, kind: str = "svd", k: int = 20):
+        self.kind = kind
+        self.k = k
+        self.algo = make_model(kind, k)
+        self._global_mean = 3.5
+
+    def fit(self, ratings: pd.DataFrame, trainset=None):
+        if trainset is None:
+            trainset = build_dataset(ratings).build_full_trainset()
+        self.algo.fit(trainset)
+        self._global_mean = trainset.global_mean
+        return self
+
+    def predict(self, user_id, book_id) -> float:
+        return self.algo.predict(user_id, book_id).est
+
+    def predict_for_user(self, user_id, book_ids) -> pd.Series:
+        est = [self.predict(user_id, b) for b in book_ids]
+        return pd.Series(est, index=list(book_ids), name="cf_score")

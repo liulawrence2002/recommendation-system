@@ -1,0 +1,12 @@
+# Core (the framework runs on these)
+numpy<2.0            # required: scikit-surprise compiled against NumPy 1.x
+pandas
+scikit-learn
+streamlit
+
+# Collaborative filtering (from class)
+scikit-surprise      # if pip can't build a wheel: conda install -c conda-forge scikit-surprise
+
+# Optional "go beyond class" upgrades
+# sentence-transformers   # semantic book embeddings (content_model backend="embeddings")
+# faiss-cpu               # fast nearest-neighbor search at catalog scale
