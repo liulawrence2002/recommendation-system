@@ -74,8 +74,25 @@ with st.sidebar:
     st.divider()
     st.subheader("LLM layer")
     have_key = bool(os.environ.get("GEMINI_API_KEY"))
-    st.caption("GEMINI_API_KEY found." if have_key
-               else "No GEMINI_API_KEY -> heuristic fallback re-ranker.")
+    try:
+        import google.generativeai  # noqa: F401
+        have_sdk = True
+    except Exception:
+        have_sdk = False
+    if have_key and have_sdk:
+        st.caption("GEMINI_API_KEY + SDK ready (Gemini re-rank).")
+    elif have_key:
+        st.caption("GEMINI_API_KEY set; install: pip install google-generativeai")
+    else:
+        st.caption("No GEMINI_API_KEY -> heuristic fallback re-ranker.")
+    with st.expander("How the LLM layer works (grounded rerank)"):
+        st.markdown(
+            "1. CF produces Top-N candidates with real `book_id`s only.\n"
+            "2. Metadata (title, authors, year, avg rating) is sent to Gemini.\n"
+            "3. The model **re-ranks** — it cannot invent books; only listed IDs are accepted.\n\n"
+            f"Model: `{llm_rerank.DEFAULT_MODEL}` · Provider: Google · "
+            "See `docs/LLM_RERANK.md` for the full prompt strategy."
+        )
     if not HAVE_SURPRISE:
         st.warning("scikit-surprise not installed -> only the popularity baseline is available.")
 
@@ -114,8 +131,12 @@ if st.session_state["cf_recs"] is not None:
         cands = llm_rerank.candidates_from_recs(recs, books)
         with st.spinner("Asking the LLM to re-rank..."):
             picks, used_llm = llm_rerank.rerank(cands, pref, top_k=k)
-        st.caption("Source: " + ("Gemini LLM" if used_llm
-                                 else "heuristic fallback (set GEMINI_API_KEY for the real LLM)"))
+        src = "Gemini LLM" if used_llm else "heuristic fallback"
+        if not used_llm and have_key and not have_sdk:
+            src += " (install google-generativeai)"
+        elif not used_llm and not have_key:
+            src += " (set GEMINI_API_KEY)"
+        st.caption(f"Source: {src} · model: {llm_rerank.DEFAULT_MODEL}")
         for i, p in enumerate(picks, 1):
             with st.container(border=True):
                 st.markdown(f"**{i}. {p.title}** - *{p.authors}*")

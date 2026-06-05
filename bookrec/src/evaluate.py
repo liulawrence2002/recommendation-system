@@ -88,3 +88,26 @@ def coverage(recommended_lists, catalog_size: int) -> float:
     for lst in recommended_lists:
         rec.update(lst)
     return len(rec) / catalog_size if catalog_size else 0.0
+
+
+def compare_cf_models(train: pd.DataFrame, test: pd.DataFrame,
+                      models: dict, k: int = 10, threshold: float = 4.0) -> pd.DataFrame:
+    """RMSE + Precision/Recall/NDCG@K for each model in {name: model}.
+
+    models may be CFModel, PopularityModel, or any object with predict() and
+    predict_for_user().
+    """
+    rows = []
+    for name, model in models.items():
+        def scorer(m):
+            def f(user_id, book_ids):
+                return m.predict_for_user(user_id, book_ids)
+            return f
+
+        metrics = ranking_metrics(scorer(model), train, test, k=k, threshold=threshold)
+        metrics["RMSE"] = round(rmse(model, test), 4)
+        metrics["model"] = name
+        rows.append(metrics)
+    out = pd.DataFrame(rows).set_index("model")
+    cols = ["RMSE"] + [c for c in out.columns if c != "RMSE"]
+    return out[cols].round(4)

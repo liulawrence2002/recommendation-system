@@ -160,13 +160,21 @@ def candidates_from_recs(recs_df, books):
     meta = books.set_index("book_id")
     out = []
     for r in recs_df.itertuples(index=False):
-        m = meta.loc[r.book_id] if r.book_id in meta.index else {}
+        year, avg = "?", "?"
+        if r.book_id in meta.index:
+            row = meta.loc[r.book_id]
+            y = row.get("original_publication_year", None)
+            if y is not None and y == y:  # not NaN
+                year = int(float(y))
+            a = row.get("average_rating", None)
+            if a is not None and a == a:
+                avg = round(float(a), 2)
         out.append({
             "book_id": r.book_id,
             "title": getattr(r, "title", ""),
             "authors": getattr(r, "authors", ""),
-            "year": int(m["original_publication_year"]) if "original_publication_year" in getattr(m, "index", []) else "?",
-            "average_rating": float(m["average_rating"]) if "average_rating" in getattr(m, "index", []) else "?",
+            "year": year,
+            "average_rating": avg,
             "cf_score": round(float(getattr(r, "score", 0.0)), 3),
         })
     return out

@@ -10,6 +10,9 @@ Default vectorizer is TF-IDF (fast, no heavy deps, mirrors the guide's
 Section 6.1). To upgrade to semantic embeddings (guide Section 6.2), set
 backend="embeddings" and install sentence-transformers — the rest of the
 package is unchanged because both backends expose the same .item_vectors.
+
+Vectors are kept in memory (numpy/sklearn sparse). At ~10k books this is
+sufficient; do not add ChromaDB unless the catalog grows to millions of items.
 """
 from __future__ import annotations
 

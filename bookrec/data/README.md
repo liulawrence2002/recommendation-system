@@ -17,6 +17,9 @@ Notes: there is **no shelf-tags file** in this dataset (content signal is
 title + authors only), and some author names arrive mojibaked
 (`Mary GrandPrÃ©`) — `load()` repairs the encoding automatically.
 
+**No vector database:** content similarity is computed in memory (`src/content_model.py`).
+This catalog (~10k books) does not need ChromaDB/FAISS for the assignment pipeline.
+
 ---
 
 The framework also runs **without any data** using a synthetic generator

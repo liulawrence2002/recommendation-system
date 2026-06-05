@@ -37,7 +37,27 @@ bookrec/
     hybrid.py                  # blend CF + content; cold start
     evaluate.py                # RMSE + Precision/Recall@K + NDCG@K + coverage
     recommend.py               # top-N orchestration + explanations
+    llm_rerank.py              # grounded Gemini re-rank (see docs/LLM_RERANK.md)
+  docs/
+    LLM_RERANK.md              # prompt strategy, grounding, env setup
 ```
+
+## Vector representations (no ChromaDB)
+
+Book similarity uses **in-memory** vectors in `content_model.py` (TF-IDF by default, or
+`sentence-transformers` via `backend="embeddings"`). At ~10k books, full-catalog scoring
+is fast enough that a vector database (Chroma, Pinecone, etc.) adds complexity without
+improving the graded pipeline. See `docs/LLM_RERANK.md` for when ANN/vector stores matter
+at larger scale.
+
+## LLM personalization layer
+
+```bash
+pip install google-generativeai
+export GEMINI_API_KEY=your_key   # optional; heuristic fallback if unset
+```
+
+Details: [`docs/LLM_RERANK.md`](docs/LLM_RERANK.md).
 
 ## The one mental model
 

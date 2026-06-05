@@ -7,6 +7,9 @@ streamlit
 # Collaborative filtering (from class)
 scikit-surprise      # if pip can't build a wheel: conda install -c conda-forge scikit-surprise
 
-# Optional "go beyond class" upgrades
+# LLM re-ranking layer (assignment)
+google-generativeai
+
+# Optional "go beyond class" upgrades (in-memory vectors — no ChromaDB)
 # sentence-transformers   # semantic book embeddings (content_model backend="embeddings")
-# faiss-cpu               # fast nearest-neighbor search at catalog scale
+# faiss-cpu               # only if catalog grows well beyond ~10k books
