@@ -1,21 +1,26 @@
-# 📚 bookrec — Goodreads Book Recommender (project scaffold)
+# bookrec — Goodreads Book Recommender (Project 2)
 
-A runnable starting point for your recommendation project. It extends the
-Week-3 class notebook (collaborative filtering with `surprise`) into a
-**hybrid book recommender** (collaborative + content) with a **Streamlit app**.
-
-It runs **on day one with synthetic data** — no downloads needed — so you can
-see the whole pipeline work, then swap in real goodbooks-10k data.
+Collaborative-filtering recommender for the Goodreads assignment dataset, with a
+**Streamlit app** and optional **Gemini LLM re-ranking** layer.
 
 ## Quickstart
 
 ```bash
 cd bookrec
-pip install -r requirements.txt          # numpy<2.0 matters for scikit-surprise
-streamlit run app.py                     # launches the app in your browser
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # macOS / Linux
+pip install -r requirements.txt # numpy<2.0 required for scikit-surprise
+streamlit run app.py
 ```
 
-Or work through the notebook first: `notebooks/01_build_book_recommender.ipynb`.
+**CLI bake-off** (teammate's Project 2 shell):
+
+```bash
+python scripts/run_cf_bakeoff.py
+```
+
+Or work through the notebook: `notebooks/01_build_book_recommender.ipynb`.
 
 ## What's here
 
@@ -23,6 +28,8 @@ Or work through the notebook first: `notebooks/01_build_book_recommender.ipynb`.
 bookrec/
   app.py                       # Streamlit app (the deliverable)
   requirements.txt
+  scripts/
+    run_cf_bakeoff.py          # CLI: Baseline vs UBCF vs IBCF (Project 2 shell)
   PROJECT_FRAMEWORK.md         # the plan: milestones, architecture, decisions
   README.md                    # this file
   data/

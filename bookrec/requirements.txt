@@ -9,6 +9,7 @@ scikit-surprise      # if pip can't build a wheel: conda install -c conda-forge 
 
 # LLM re-ranking layer (assignment)
 google-generativeai
+python-dotenv
 
 # Optional "go beyond class" upgrades (in-memory vectors — no ChromaDB)
 # sentence-transformers   # semantic book embeddings (content_model backend="embeddings")

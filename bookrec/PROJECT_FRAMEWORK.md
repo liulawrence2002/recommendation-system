@@ -143,4 +143,4 @@ Gemini key end-to-end (optional locally).
 - **Popularity bias.** The `min_ratings` filter and popularity baseline both lean
   on popular books — watch coverage and mention the trade-off.
 
-Theory backup for any section: `../goodreads_recommender_guide.md`.
+Theory backup for any section: `../docs/goodreads_recommender_guide.md`.

@@ -36,7 +36,7 @@ def build_dataset(ratings: pd.DataFrame):
         ratings[["user_id", "book_id", "rating"]], reader)
 
 
-def make_model(kind: str = "svd", k: int = 20):
+def make_model(kind: str = "svd", k: int = 10):
     """Factory: 'svd', 'ubcf' (user-based, Pearson), 'ibcf' (item-based, cosine),
     'baseline' (global + user + item means)."""
     surprise = _require_surprise()
@@ -86,7 +86,7 @@ class PopularityModel:
 class CFModel:
     """Uniform wrapper: train, then .predict(user, book) -> estimated rating."""
 
-    def __init__(self, kind: str = "svd", k: int = 20):
+    def __init__(self, kind: str = "svd", k: int = 10):
         self.kind = kind
         self.k = k
         self.algo = make_model(kind, k)
