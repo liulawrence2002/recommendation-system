@@ -1,0 +1,328 @@
+# near line 1643
+# Because your file is a .png, first update asset_data_uri() so it does not always label images as WebP.
+# Replace this line inside asset_data_uri():
+mime = "image/png" if filename.lower().endswith(".png") else "image/webp"
+return f"data:{mime};base64,{_encode_asset(path, os.path.getmtime(path))}"
+
+#after the webp add
+coffee_uri = asset_data_uri("coffee-backdrop.png")
+
+#around line 1648
+if coffee_uri:
+    coffee_floats = "\n".join(
+        f'<img class="coffee-float coffee-float-{i}" src="{coffee_uri}" alt="">'
+        for i in range(1, 13)
+    )
+
+    st.markdown(
+        f'<div class="coffee-float-layer" aria-hidden="true">{coffee_floats}</div>',
+        unsafe_allow_html=True,
+    )
+#inside your big CSS block in inject_css(), add:
+.coffee-float-layer {
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    position: fixed;
+    z-index: 0;
+}
+
+.coffee-float {
+    animation: coffee-drift 18s ease-in-out infinite alternate;
+    border-radius: 999px;
+    filter: drop-shadow(0 14px 24px rgba(42, 33, 24, 0.22));
+    height: 72px;
+    object-fit: cover;
+    opacity: 0.28;
+    position: absolute;
+    width: 72px;
+}
+
+.coffee-float-1 { left: 4%; top: 12%; animation-delay: -1s; }
+.coffee-float-2 { left: 18%; top: 32%; animation-delay: -7s; }
+.coffee-float-3 { left: 35%; top: 10%; animation-delay: -4s; }
+.coffee-float-4 { left: 52%; top: 24%; animation-delay: -10s; }
+.coffee-float-5 { left: 72%; top: 14%; animation-delay: -2s; }
+.coffee-float-6 { left: 88%; top: 38%; animation-delay: -6s; }
+.coffee-float-7 { left: 8%; top: 70%; animation-delay: -9s; }
+.coffee-float-8 { left: 26%; top: 82%; animation-delay: -3s; }
+.coffee-float-9 { left: 46%; top: 66%; animation-delay: -12s; }
+.coffee-float-10 { left: 63%; top: 78%; animation-delay: -5s; }
+.coffee-float-11 { left: 80%; top: 64%; animation-delay: -8s; }
+.coffee-float-12 { left: 94%; top: 82%; animation-delay: -11s; }
+
+@keyframes coffee-drift {
+    0% {
+        transform: translate3d(-10px, 8px, 0) rotate(-6deg) scale(0.9);
+    }
+    50% {
+        transform: translate3d(12px, -18px, 0) rotate(5deg) scale(1.04);
+    }
+    100% {
+        transform: translate3d(-4px, -34px, 0) rotate(-3deg) scale(0.96);
+    }
+}
+
+# after line 1765 in app.py
+# --- Exploratory Data Analysis ---
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+
+st.markdown('<div id="eda" class="section"></div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-title">Exploratory data analysis</div>'
+    '<div class="section-copy">Dataset health checks, rating patterns, reader behavior, and book popularity.</div>',
+    unsafe_allow_html=True,
+)
+
+with st.expander("Open EDA visuals", expanded=True):
+    overview_tab, ratings_tab, users_tab, books_tab, metadata_tab = st.tabs(
+        ["Overview", "Ratings", "Users", "Books", "Metadata"]
+    )
+
+    with overview_tab:
+        st.markdown("#### Preview")
+        preview_cols = [col for col in ["book_id", "title", "authors", "average_rating", "ratings_count"] if col in books.columns]
+        st.dataframe(books[preview_cols].head(), width="stretch", hide_index=True)
+        st.dataframe(ratings.head(), width="stretch", hide_index=True)
+
+        quality_checks = pd.DataFrame({
+            "check": [
+                "Duplicate book IDs",
+                "Duplicate user-book ratings",
+                "Ratings with no matching book",
+                "Missing book titles",
+                "Missing user IDs",
+                "Missing book IDs in ratings",
+                "Missing ratings",
+            ],
+            "count": [
+                books["book_id"].duplicated().sum(),
+                ratings.duplicated(["user_id", "book_id"]).sum(),
+                (~ratings["book_id"].isin(books["book_id"])).sum(),
+                books["title"].isna().sum() if "title" in books.columns else 0,
+                ratings["user_id"].isna().sum(),
+                ratings["book_id"].isna().sum(),
+                ratings["rating"].isna().sum(),
+            ],
+        })
+
+        st.markdown("#### Data quality checks")
+        st.dataframe(quality_checks, width="stretch", hide_index=True)
+
+    with ratings_tab:
+        rating_dist = (
+            ratings["rating"]
+            .value_counts()
+            .sort_index()
+            .rename_axis("rating")
+            .reset_index(name="count")
+        )
+        rating_dist["percent"] = (rating_dist["count"] / len(ratings) * 100).round(2)
+
+        st.dataframe(rating_dist, width="stretch", hide_index=True)
+        st.write("Mean rating:", round(ratings["rating"].mean(), 3))
+        st.write("Median rating:", ratings["rating"].median())
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar(rating_dist["rating"], rating_dist["count"], color="steelblue", edgecolor="white")
+        ax.set_title("Rating Distribution")
+        ax.set_xlabel("Rating")
+        ax.set_ylabel("Number of Ratings")
+        ax.set_xticks(rating_dist["rating"])
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    with users_tab:
+        user_summary = (
+            ratings.groupby("user_id")
+            .agg(
+                n_ratings=("rating", "count"),
+                avg_rating=("rating", "mean"),
+                rating_std=("rating", "std"),
+                min_rating=("rating", "min"),
+                max_rating=("rating", "max"),
+                unique_ratings=("rating", "nunique"),
+            )
+            .reset_index()
+        )
+
+        st.dataframe(user_summary.describe(), width="stretch")
+
+        single_value_users = user_summary[user_summary["unique_ratings"] == 1]
+        all_five_users = single_value_users[single_value_users["avg_rating"] == 5]
+
+        st.write("Users who only use one rating value:", len(single_value_users))
+        st.write("Users who only gave 5-star ratings:", len(all_five_users))
+
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+        axes[0].hist(user_summary["n_ratings"], bins=30, color="steelblue", edgecolor="white")
+        axes[0].set_title("Ratings Per User")
+        axes[0].set_xlabel("Number of Ratings")
+        axes[0].set_ylabel("Users")
+
+        axes[1].hist(user_summary["avg_rating"], bins=30, color="steelblue", edgecolor="white")
+        axes[1].set_title("Average Rating Per User")
+        axes[1].set_xlabel("Average Rating")
+
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    with books_tab:
+        merge_cols = [
+            col for col in [
+                "book_id",
+                "title",
+                "authors",
+                "original_publication_year",
+                "language_code",
+                "average_rating",
+                "ratings_count",
+                "text_reviews_count",
+            ]
+            if col in books.columns
+        ]
+
+        book_summary = (
+            ratings.groupby("book_id")
+            .agg(
+                observed_ratings=("rating", "count"),
+                observed_avg_rating=("rating", "mean"),
+                observed_rating_std=("rating", "std"),
+            )
+            .reset_index()
+            .merge(books[merge_cols], on="book_id", how="left")
+        )
+
+        st.dataframe(book_summary.describe(), width="stretch")
+
+        st.markdown("#### Most-rated books")
+        display_cols = [
+            col for col in ["book_id", "title", "authors", "observed_ratings", "observed_avg_rating"]
+            if col in book_summary.columns
+        ]
+        st.dataframe(
+            book_summary.sort_values("observed_ratings", ascending=False).head(15)[display_cols],
+            width="stretch",
+            hide_index=True,
+        )
+
+        fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+        axes[0].hist(book_summary["observed_ratings"], bins=40, color="steelblue", edgecolor="white")
+        axes[0].set_title("Ratings Per Book")
+        axes[0].set_xlabel("Observed Ratings")
+        axes[0].set_ylabel("Books")
+
+        axes[1].scatter(
+            book_summary["observed_ratings"],
+            book_summary["observed_avg_rating"],
+            alpha=0.35,
+        )
+        axes[1].set_title("Book Rating Count vs Average Rating")
+        axes[1].set_xlabel("Observed Ratings")
+        axes[1].set_ylabel("Observed Average Rating")
+
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+        min_support = 20
+        supported_books = book_summary[book_summary["observed_ratings"] >= min_support]
+
+        top_bottom_cols = [
+            col for col in ["title", "authors", "observed_ratings", "observed_avg_rating", "average_rating"]
+            if col in supported_books.columns
+        ]
+
+        st.markdown(f"#### Highest-rated books with at least {min_support} ratings")
+        st.dataframe(
+            supported_books.sort_values("observed_avg_rating", ascending=False).head(10)[top_bottom_cols],
+            width="stretch",
+            hide_index=True,
+        )
+
+        st.markdown(f"#### Lowest-rated books with at least {min_support} ratings")
+        st.dataframe(
+            supported_books.sort_values("observed_avg_rating", ascending=True).head(10)[top_bottom_cols],
+            width="stretch",
+            hide_index=True,
+        )
+
+        book_popularity = ratings["book_id"].value_counts()
+
+        popularity_summary = pd.DataFrame({
+            "top_n_books": [10, 50, 100, 500, 1000]
+        })
+        popularity_summary["percent_of_all_ratings"] = popularity_summary["top_n_books"].apply(
+            lambda n: round(100 * book_popularity.head(n).sum() / len(ratings), 2)
+        )
+
+        st.markdown("#### Popularity concentration")
+        st.dataframe(popularity_summary, width="stretch", hide_index=True)
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        book_popularity.reset_index(drop=True).plot(ax=ax, color="steelblue")
+        ax.set_title("Book Popularity Long Tail")
+        ax.set_xlabel("Books Ranked by Popularity")
+        ax.set_ylabel("Number of Ratings")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
+    with metadata_tab:
+        metadata_cols = [
+            col for col in ["language_code", "isbn", "original_publication_year", "authors"]
+            if col in books.columns
+        ]
+
+        metadata_summary = pd.DataFrame({
+            "column": metadata_cols,
+            "missing_count": [books[col].isna().sum() for col in metadata_cols],
+        })
+        metadata_summary["missing_percent"] = (
+            metadata_summary["missing_count"] / len(books) * 100
+        ).round(2)
+
+        st.dataframe(metadata_summary, width="stretch", hide_index=True)
+
+        if "language_code" in books.columns:
+            st.markdown("#### Most common languages")
+            st.dataframe(
+                books["language_code"]
+                .fillna("Missing")
+                .value_counts()
+                .head(15)
+                .to_frame("book_count"),
+                width="stretch",
+            )
+
+        if "authors" in books.columns:
+            st.markdown("#### Most common authors")
+            st.dataframe(
+                books["authors"]
+                .dropna()
+                .str.split(",")
+                .explode()
+                .str.strip()
+                .value_counts()
+                .head(20)
+                .to_frame("book_count"),
+                width="stretch",
+            )
+
+        if "original_publication_year" in books.columns:
+            st.markdown("#### Potential publication year anomalies")
+            year_anomalies = books[
+                (books["original_publication_year"] < 0)
+                | (books["original_publication_year"] > 2026)
+            ]
+            anomaly_cols = [
+                col for col in ["book_id", "title", "authors", "original_publication_year"]
+                if col in year_anomalies.columns
+            ]
+            st.dataframe(year_anomalies[anomaly_cols].head(20), width="stretch", hide_index=True)
