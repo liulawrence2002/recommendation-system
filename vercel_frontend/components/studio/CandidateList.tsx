@@ -8,7 +8,7 @@ function Cover({ book, title }: { book?: Book; title: string }) {
   const cover = book?.cover || book?.image || "";
   const url = book?.url || "";
   const inner = cover.startsWith("http") ? (
-    <img className="rec-cover" src={cover} alt="" loading="lazy" referrerPolicy="no-referrer" />
+    <img className="rec-cover" src={cover} alt={title} loading="lazy" referrerPolicy="no-referrer" />
   ) : (
     <span className="rec-cover cover-empty" aria-hidden="true">
       📖

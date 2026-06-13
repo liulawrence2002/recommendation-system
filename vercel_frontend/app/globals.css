@@ -158,6 +158,163 @@ h1, h2, h3, h4 {
   background: radial-gradient(125% 120% at 50% 28%, transparent 52%, rgba(58, 38, 18, 0.16) 100%);
 }
 
+/* ---- ambient SVG art (constellation graph + page spiral + light-leak) ---- */
+.bg-art {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* parallax wrappers: translate by a fraction of scroll for cinematic depth */
+.par {
+  position: absolute;
+  inset: 0;
+  will-change: transform;
+}
+
+.par-slow {
+  transform: translate3d(0, var(--parallax-slow, 0px), 0);
+}
+
+.par-fast {
+  transform: translate3d(0, var(--parallax-fast, 0px), 0);
+}
+
+.bg-constellation {
+  position: absolute;
+  top: 7vh;
+  right: -2vw;
+  width: clamp(320px, 34vw, 560px);
+  opacity: 0.17;
+  animation: art-drift 30s ease-in-out infinite;
+}
+
+.bg-spiral {
+  position: absolute;
+  bottom: -8vh;
+  left: -5vw;
+  width: clamp(300px, 30vw, 480px);
+  opacity: 0.13;
+  transform-origin: 50% 50%;
+  animation: art-spin 120s linear infinite;
+}
+
+.bg-constellation svg,
+.bg-spiral svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.light-leak {
+  position: absolute;
+  top: -25vh;
+  left: 28vw;
+  width: 44vw;
+  height: 150vh;
+  background: linear-gradient(108deg, transparent 42%, rgba(230, 171, 95, 0.16) 50%, transparent 58%);
+  filter: blur(34px);
+  mix-blend-mode: screen;
+  transform: rotate(8deg);
+  animation: leak-breathe 15s ease-in-out infinite;
+}
+
+@keyframes art-drift {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(-1.6vw, 2.2vh); }
+}
+
+@keyframes art-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes leak-breathe {
+  0%, 100% { opacity: 0.45; transform: rotate(8deg) translateX(0); }
+  50% { opacity: 0.9; transform: rotate(8deg) translateX(4vw); }
+}
+
+/* ---- hero centerpiece: glow halo + pages lifting off ---- */
+.book-stage--ambient {
+  position: relative;
+}
+
+.book-glow {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: clamp(280px, 34vw, 460px);
+  height: clamp(280px, 34vw, 460px);
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(230, 171, 95, 0.36), rgba(230, 171, 95, 0) 66%);
+  filter: blur(10px);
+  z-index: -1;
+  pointer-events: none;
+  animation: glow-pulse 6s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.7; transform: translate(-50%, -50%) scale(1); }
+  50% { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
+}
+
+.book-embers {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.ember {
+  position: absolute;
+  width: 10px;
+  height: 13px;
+  border-radius: 1px 2px 2px 1px;
+  background: linear-gradient(180deg, #fdf9ef, #f1e2c4);
+  border: 1px solid rgba(120, 90, 50, 0.18);
+  box-shadow: 0 2px 6px rgba(74, 54, 32, 0.12);
+  opacity: 0;
+  animation: ember-rise 7s ease-in-out infinite;
+}
+
+@keyframes ember-rise {
+  0% { opacity: 0; transform: translate(0, 28px) rotate(0deg) scale(0.8); }
+  16% { opacity: 0.85; }
+  70% { opacity: 0.65; }
+  100% {
+    opacity: 0;
+    transform: translate(var(--edx, 20px), -120px) rotate(var(--er, 40deg)) scale(1);
+  }
+}
+
+.ember-1 { left: -42px; top: -8px;  --edx: -30px; --er: -50deg; animation-delay: 0s;   animation-duration: 7s; }
+.ember-2 { left: 22px;  top: -18px; --edx: 24px;  --er: 40deg;  animation-delay: 1.2s; animation-duration: 8.4s; }
+.ember-3 { left: -8px;  top: 2px;   --edx: -12px; --er: 25deg;  animation-delay: 2.5s; animation-duration: 7.6s; }
+.ember-4 { left: 50px;  top: -4px;  --edx: 34px;  --er: 55deg;  animation-delay: 3.4s; animation-duration: 9s; }
+.ember-5 { left: -56px; top: -22px; --edx: -22px; --er: -35deg; animation-delay: 4.6s; animation-duration: 8s; }
+.ember-6 { left: 10px;  top: -28px; --edx: 14px;  --er: 30deg;  animation-delay: 5.5s; animation-duration: 7.2s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .par-slow,
+  .par-fast {
+    transform: none;
+  }
+
+  .bg-constellation,
+  .bg-spiral,
+  .light-leak,
+  .book-glow,
+  .ember {
+    animation: none;
+  }
+
+  .ember {
+    opacity: 0;
+  }
+}
+
 /* ============================ Layout primitives ============================ */
 .page {
   position: relative;

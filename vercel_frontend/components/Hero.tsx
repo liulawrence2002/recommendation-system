@@ -40,7 +40,7 @@ export default function Hero({
         animate={{ opacity: 1, scale: 1 }}
         transition={reduce ? { duration: 0 } : { duration: 1, ease: [0.2, 0.8, 0.2, 1] }}
       >
-        <FlippingBook />
+        <FlippingBook ambient />
       </motion.div>
 
       <motion.div className="eyebrow hero-kicker" custom={0} variants={fade} initial={reduce ? false : "hidden"} animate="show">
