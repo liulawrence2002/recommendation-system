@@ -78,3 +78,11 @@ See `bookrec/PROJECT_FRAMEWORK.md` for the full rubric map.
 - `numpy<2.0` is required for `scikit-surprise` on many platforms.
 - If `pip install scikit-surprise` fails: `conda install -c conda-forge scikit-surprise`
 - Never commit API keys. Use `bookrec/.env` or `.streamlit/secrets.toml` (both gitignored).
+
+
+
+---
+### potentially, add filters on decade, genre , potentially book , author ... 
+- update the hero landing page text 
+- there is a gap between the quality check and the  ready where you are
+- 

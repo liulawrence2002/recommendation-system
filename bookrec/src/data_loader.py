@@ -18,7 +18,7 @@ import os
 import pandas as pd
 
 REQUIRED_BOOK_COLS = ["book_id", "title", "authors", "original_publication_year",
-                      "average_rating", "ratings_count", "tags"]
+                      "average_rating", "ratings_count", "tags", "genre"]
 
 
 def load_sample():
@@ -62,6 +62,16 @@ def load(data_dir: str = "data", fix_encoding: bool = True):
                 books[col] = books[col].map(_fix_mojibake)
 
     books["tags"] = ""                       # no shelf tags in this dataset
+
+    # Optional genre-ready hook: if a genres.csv is dropped in data_dir, merge it.
+    # Contract: genres.csv has columns book_id (int) + genre (string; multiple
+    # genres comma-separated in a single cell, matching filter_book_ids' split).
+    # Absent (the case today) -> strict no-op; _coerce_books fills genre="".
+    genres_path = os.path.join(data_dir, "genres.csv")
+    if os.path.exists(genres_path):
+        genres = pd.read_csv(genres_path)[["book_id", "genre"]]
+        books = books.merge(genres, on="book_id", how="left")
+
     books = _coerce_books(books)
     ratings = ratings[["user_id", "book_id", "rating"]].copy()
     ratings["rating"] = ratings["rating"].astype(float)
@@ -107,7 +117,7 @@ def _coerce_books(books: pd.DataFrame) -> pd.DataFrame:
     defaults = {
         "title": "Untitled", "authors": "Unknown",
         "original_publication_year": 0, "average_rating": 0.0,
-        "ratings_count": 0, "tags": "",
+        "ratings_count": 0, "tags": "", "genre": "",
     }
     for col, val in defaults.items():
         if col not in books.columns:

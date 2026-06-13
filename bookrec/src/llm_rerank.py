@@ -34,7 +34,8 @@ class RerankedPick:
     book_id: int
     title: str
     authors: str
-    explanation: str
+    explanation: str          # WHY this book earned its rank — ties to the reader intent
+    description: str = ""      # ONE neutral sentence describing what the book IS / is about
 
 
 def _candidate_table(candidates):
@@ -50,6 +51,30 @@ def _candidate_table(candidates):
     return "\n".join(lines)
 
 
+def _synth_description(c) -> str:
+    """Synthesize a neutral one-sentence book description from the metadata we
+    have (author, year, average_rating). Used when no synopsis/genre text exists
+    and as the offline fallback. Never crashes on missing/"?" values."""
+    title = str(c.get("title", "") or "this book").strip()
+    authors = str(c.get("authors", "") or "").strip()
+    year = c.get("year", "?")
+    avg = c.get("average_rating", "?")
+
+    parts = [f"“{title}”"]
+    if authors and authors != "?":
+        parts.append(f"by {authors}")
+    # only mention the year if it looks like a real value
+    if year not in (None, "", "?") and str(year).strip() not in ("", "?"):
+        parts.append(f"published in {year}")
+    sentence = " ".join(parts)
+    # close with a rating clause when available, otherwise a neutral fallback
+    if avg not in (None, "", "?") and str(avg).strip() not in ("", "?"):
+        sentence += f", a reader-rated book averaging {avg}/5."
+    else:
+        sentence += ", a book from this collection."
+    return sentence
+
+
 def build_prompt(candidates, preference: str, top_k: int) -> str:
     """The re-ranking prompt. Constrains output to the candidate book_ids."""
     table = _candidate_table(candidates)
@@ -63,9 +88,12 @@ def build_prompt(candidates, preference: str, top_k: int) -> str:
         f"Instructions:\n"
         f"- Select and order the {top_k} best matches for the preference.\n"
         f"- Do NOT invent books. Use only book_ids from this list: {ids}.\n"
-        f"- For each, give a one-sentence explanation tied to the preference and the book's metadata.\n"
+        f"- For each, give a one-sentence neutral DESCRIPTION of what the book itself is "
+        f"about, plus a one-sentence EXPLANATION of why it fits the preference and the "
+        f"book's metadata.\n"
         f"- Respond with STRICT JSON: a list of objects "
-        f'{{"book_id": <int>, "explanation": "<str>"}} and nothing else.'
+        f'{{"book_id": <int>, "description": "<one sentence about the book>", '
+        f'"explanation": "<one sentence on why it fits the preference>"}} and nothing else.'
     )
 
 
@@ -113,7 +141,8 @@ def _heuristic_rerank(candidates, preference, top_k):
     for overlap, _, c in scored[:top_k]:
         why = (f"matches “{preference}” on its title/author"
                if overlap else f"top collaborative-filtering pick for this user")
-        picks.append(RerankedPick(c["book_id"], c["title"], c.get("authors", ""), why))
+        picks.append(RerankedPick(c["book_id"], c["title"], c.get("authors", ""), why,
+                                  description=_synth_description(c)))
     return picks
 
 
@@ -145,8 +174,9 @@ def rerank(candidates, preference: str, top_k: int = 5,
         bid = item.get("book_id")
         if bid in by_id:                          # enforce: only real candidates
             c = by_id[bid]
+            desc = str(item.get("description", "")).strip() or _synth_description(c)
             picks.append(RerankedPick(bid, c["title"], c.get("authors", ""),
-                                      item.get("explanation", "")))
+                                      item.get("explanation", ""), description=desc))
         if len(picks) >= top_k:
             break
     if not picks:                                 # model returned nothing usable

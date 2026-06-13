@@ -11,11 +11,15 @@ app uses a transparent heuristic re-ranker so it always runs.
 from __future__ import annotations
 
 import base64
+from dataclasses import asdict
 from html import escape
 import os
+import re
 import sys
+import urllib.parse
 import warnings
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -24,7 +28,7 @@ load_dotenv(os.path.join(_APP_DIR, ".env"))
 
 sys.path.insert(0, _APP_DIR)
 
-from src import data_loader, evaluate, llm_rerank, recommend  # noqa: E402
+from src import data_loader, evaluate, llm_rerank, rag_pipeline, recommend  # noqa: E402
 from src.cf_model import PopularityModel  # noqa: E402
 
 try:
@@ -43,14 +47,21 @@ st.set_page_config(
 )
 
 DEFAULT_K = 10
+DEFAULT_UBCF_K = 21
 DEFAULT_MIN_RATINGS = 20
 RANDOM_STATE = 6604
 
 SOURCE_REAL = "Real dataset"
 SOURCE_SAMPLE = "Synthetic sample"
 
+NOTEBOOK_METRICS = [
+    ("Baseline", 0.6568, 0.7912, 0.7178),
+    ("UBCF (pearson)", 0.6586, 0.7930, 0.7196),
+    ("IBCF (cosine)", 0.6414, 0.7734, 0.7012),
+]
+
 MODEL_LABELS = {
-    "ubcf": "User-based CF",
+    "ubcf": "User-based CF (best)",
     "ibcf": "Item-based CF",
     "baseline": "Baseline means",
     "svd": "SVD",
@@ -408,12 +419,13 @@ def inject_css() -> None:
         }
 
         .rec-card {
+            align-items: center;
             background: var(--surface);
             border: 1px solid var(--line);
             border-radius: 8px;
             display: grid;
-            gap: 0.85rem;
-            grid-template-columns: 3rem minmax(0, 1fr) auto;
+            gap: 0.8rem;
+            grid-template-columns: 2.35rem 2.5rem minmax(0, 1fr) auto;
             padding: 1rem;
             transition: border-color 140ms ease, box-shadow 140ms ease,
                 transform 140ms ease;
@@ -438,12 +450,53 @@ def inject_css() -> None:
             width: 2.35rem;
         }
 
+        .rec-cover {
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            border-radius: 4px;
+            box-shadow: 0 2px 8px rgba(74, 54, 32, 0.18);
+            display: block;
+            height: 3.6rem;
+            object-fit: cover;
+            transition: box-shadow 160ms ease, transform 160ms ease;
+            width: 2.5rem;
+        }
+
+        .rec-cover--empty {
+            align-items: center;
+            color: var(--muted);
+            display: flex;
+            font-size: 1.05rem;
+            justify-content: center;
+        }
+
+        .rec-cover-link {
+            display: block;
+            line-height: 0;
+        }
+
+        .rec-cover-link:hover .rec-cover {
+            box-shadow: 0 7px 18px rgba(74, 54, 32, 0.30);
+            transform: translateY(-1px);
+        }
+
         .rec-title {
             color: var(--text);
             font-size: 1rem;
             font-weight: 750;
             line-height: 1.28;
             overflow-wrap: anywhere;
+        }
+
+        .rec-title-link {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .rec-title-link:hover {
+            text-decoration: underline;
+            text-decoration-color: var(--accent);
+            text-underline-offset: 2px;
         }
 
         .rec-author {
@@ -593,15 +646,6 @@ def inject_css() -> None:
             min-height: 2.9rem;
         }
 
-        .st-key-chat_composer div[data-testid="column"]:first-child .stButton > button {
-            color: var(--muted) !important;
-            font-size: 1.25rem !important;
-            font-weight: 600 !important;
-            min-width: 2.9rem;
-            padding-left: 0 !important;
-            padding-right: 0 !important;
-        }
-
         .st-key-chat_suggestions {
             margin: 1.1rem auto 0;
             max-width: 768px;
@@ -621,9 +665,9 @@ def inject_css() -> None:
         .chat-thread {
             display: flex;
             flex-direction: column;
-            gap: 1.85rem;
-            margin: 0.5rem auto 2.4rem;
-            max-width: 768px;
+            gap: 2.4rem;
+            margin: 0.5rem auto 2.6rem;
+            max-width: 720px;
             width: 100%;
         }
 
@@ -637,36 +681,38 @@ def inject_css() -> None:
         }
 
         .bubble-user {
-            background: #f0efe9;
-            border-radius: 1.4rem 1.4rem 0.4rem 1.4rem;
-            color: #1f1f22;
-            font-size: 0.98rem;
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            border-radius: 1.35rem 1.35rem 0.45rem 1.35rem;
+            color: #2f261b;
+            font-size: 0.97rem;
             line-height: 1.6;
-            max-width: 82%;
+            max-width: 78%;
             overflow-wrap: anywhere;
-            padding: 0.8rem 1.15rem;
+            padding: 0.7rem 1.1rem;
             white-space: pre-wrap;
         }
 
         .msg-assistant {
             align-items: flex-start;
-            gap: 0.85rem;
+            gap: 0.95rem;
             justify-content: flex-start;
         }
 
         .assistant-avatar {
             align-items: center;
-            background: #111113;
+            background: var(--ink);
             border-radius: 50%;
-            color: #fff;
+            color: #fbf6ec;
             display: inline-flex;
             flex: 0 0 auto;
-            font-size: 0.8rem;
-            font-weight: 800;
-            height: 2rem;
+            font-family: var(--serif);
+            font-size: 0.82rem;
+            font-weight: 600;
+            height: 1.95rem;
             justify-content: center;
-            margin-top: 0.15rem;
-            width: 2rem;
+            margin-top: 0.1rem;
+            width: 1.95rem;
         }
 
         .assistant-body {
@@ -676,21 +722,22 @@ def inject_css() -> None:
 
         .assistant-name {
             color: var(--text);
-            font-size: 0.9rem;
-            font-weight: 760;
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.01em;
         }
 
         .assistant-lead {
-            color: #55504b;
-            font-size: 0.94rem;
-            line-height: 1.6;
-            margin-top: 0.2rem;
+            color: #4a4031;
+            font-size: 1.04rem;
+            line-height: 1.62;
+            margin-top: 0.35rem;
         }
 
         .assistant-meta {
             color: var(--muted);
-            font-size: 0.76rem;
-            margin-top: 0.75rem;
+            font-size: 0.74rem;
+            margin-top: 0.9rem;
         }
 
         .thinking {
@@ -729,45 +776,138 @@ def inject_css() -> None:
 
         .pick-list {
             display: grid;
-            gap: 0.6rem;
-            margin-top: 0.9rem;
+            gap: 0.85rem;
+            margin-top: 1.25rem;
         }
 
         .pick-card {
-            background: #fbfbfa;
+            background: var(--surface);
             border: 1px solid var(--line);
-            border-radius: 12px;
-            padding: 0.8rem 0.95rem;
-            transition: border-color 140ms ease, box-shadow 140ms ease;
+            border-radius: 14px;
+            display: grid;
+            gap: 0.05rem 0.85rem;
+            grid-template-columns: 2.4rem 2.8rem minmax(0, 1fr);
+            padding: 1.05rem 1.15rem;
+            transition: border-color 160ms ease, box-shadow 160ms ease,
+                transform 160ms ease;
         }
 
         .pick-card:hover {
-            border-color: #d8d8dd;
-            box-shadow: 0 8px 24px rgba(17, 17, 19, 0.05);
+            border-color: var(--line-strong);
+            box-shadow: 0 14px 32px rgba(74, 54, 32, 0.12);
+            transform: translateY(-1px);
         }
 
-        .pick-label {
-            color: var(--accent);
-            font-size: 0.72rem;
-            font-weight: 780;
-            letter-spacing: 0.03em;
-            text-transform: uppercase;
+        .pick-rank {
+            align-items: center;
+            background: var(--ink);
+            border-radius: 50%;
+            color: #fbf6ec;
+            display: inline-flex;
+            font-family: var(--serif);
+            font-size: 0.92rem;
+            font-weight: 600;
+            grid-column: 1;
+            grid-row: 1 / span 3;
+            height: 2.4rem;
+            justify-content: center;
+            margin-top: 0.05rem;
+            width: 2.4rem;
+        }
+
+        .pick-cover {
+            align-self: start;
+            display: block;
+            grid-column: 2;
+            grid-row: 1 / span 3;
+            margin-top: 0.12rem;
+        }
+
+        .pick-cover-img {
+            border-radius: 5px;
+            box-shadow: 0 3px 10px rgba(74, 54, 32, 0.22);
+            display: block;
+            height: 4.2rem;
+            object-fit: cover;
+            transition: box-shadow 160ms ease, transform 160ms ease;
+            width: 2.8rem;
+        }
+
+        .pick-cover:hover .pick-cover-img {
+            box-shadow: 0 7px 18px rgba(74, 54, 32, 0.30);
+            transform: translateY(-1px);
+        }
+
+        .pick-cover--empty {
+            align-items: center;
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            box-shadow: none;
+            color: var(--muted);
+            display: flex;
+            font-size: 1.1rem;
+            justify-content: center;
         }
 
         .pick-title {
             color: var(--text);
-            font-size: 0.98rem;
-            font-weight: 740;
+            font-size: 1.04rem;
+            font-weight: 600;
+            grid-column: 3;
             line-height: 1.3;
-            margin-top: 0.22rem;
             overflow-wrap: anywhere;
         }
 
+        .pick-title-link {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        .pick-title-link:hover {
+            text-decoration: underline;
+            text-decoration-color: var(--accent);
+            text-underline-offset: 2px;
+        }
+
+        .pick-author {
+            color: var(--muted);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .pick-desc {
+            color: #4a4031;
+            font-size: 0.92rem;
+            grid-column: 3;
+            line-height: 1.58;
+            margin-top: 0.5rem;
+        }
+
         .pick-why {
-            color: #55504b;
-            font-size: 0.88rem;
+            border-left: 2px solid var(--accent);
+            color: #5f5340;
+            font-size: 0.9rem;
+            grid-column: 3;
             line-height: 1.55;
-            margin-top: 0.45rem;
+            margin-top: 0.7rem;
+            padding-left: 0.8rem;
+        }
+
+        .pick-why-label {
+            color: var(--accent);
+            display: block;
+            font-size: 0.68rem;
+            font-weight: 780;
+            letter-spacing: 0.06em;
+            margin-bottom: 0.2rem;
+            text-transform: uppercase;
+        }
+
+        .pick-empty {
+            color: #5f5340;
+            font-size: 0.92rem;
+            line-height: 1.55;
+            margin-top: 0.6rem;
         }
 
         div[data-testid="stDataFrame"] {
@@ -855,11 +995,11 @@ def inject_css() -> None:
             }
 
             .rec-card {
-                grid-template-columns: 2.7rem minmax(0, 1fr);
+                grid-template-columns: 2.1rem 2.3rem minmax(0, 1fr);
             }
 
             .rec-score {
-                grid-column: 2;
+                grid-column: 3;
                 justify-self: start;
             }
         }
@@ -982,22 +1122,8 @@ def inject_css() -> None:
             color: #2f261b;
         }
 
-        .assistant-lead,
-        .pick-why {
-            color: #5f5340;
-        }
-
         .thinking span {
             background: #b9a888;
-        }
-
-        .pick-card {
-            background: #fdf9f0;
-        }
-
-        .pick-card:hover {
-            border-color: var(--line-strong);
-            box-shadow: 0 12px 28px rgba(74, 54, 32, 0.12);
         }
 
         .stSlider label,
@@ -1269,19 +1395,477 @@ def inject_css() -> None:
             100% { transform: rotateY(0deg); }
         }
 
+        /* ============ Sequential DAG: intent chips + reasoning trace ============ */
+        .intent-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            margin: 0.65rem 0 0.2rem;
+        }
+
+        .intent-chip {
+            align-items: center;
+            background: var(--accent-soft);
+            border: 1px solid #e7d2b4;
+            border-radius: 999px;
+            color: var(--accent);
+            display: inline-flex;
+            font-size: 0.72rem;
+            font-weight: 760;
+            letter-spacing: 0.03em;
+            padding: 0.24rem 0.6rem;
+            text-transform: uppercase;
+        }
+
+        .intent-chip--avoid {
+            background: var(--surface-soft);
+            border-color: var(--line-strong);
+            color: var(--muted);
+            text-decoration: line-through;
+            text-decoration-thickness: 1px;
+        }
+
+        .reasoning-trace {
+            background: linear-gradient(180deg, #fefcf6 0%, #fbf6ec 100%);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            margin-top: 1rem;
+            overflow: hidden;
+            transition: border-color 160ms ease, box-shadow 160ms ease;
+        }
+
+        .reasoning-trace[open] {
+            border-color: var(--line-strong);
+            box-shadow: 0 16px 38px rgba(74, 54, 32, 0.12);
+        }
+
+        .reasoning-trace > summary {
+            align-items: center;
+            color: var(--ink);
+            cursor: pointer;
+            display: flex;
+            font-size: 0.86rem;
+            font-weight: 680;
+            gap: 0.5rem;
+            letter-spacing: 0.01em;
+            list-style: none;
+            padding: 0.85rem 1.05rem;
+            user-select: none;
+        }
+
+        .reasoning-trace > summary:hover {
+            background: rgba(163, 84, 33, 0.05);
+        }
+
+        .reasoning-trace > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .reasoning-trace > summary::before {
+            color: var(--accent);
+            content: "›";
+            display: inline-block;
+            font-size: 1.1rem;
+            font-weight: 800;
+            transition: transform 160ms ease;
+        }
+
+        .reasoning-trace[open] > summary::before {
+            transform: rotate(90deg);
+        }
+
+        .trace-intro {
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 0.82rem;
+            line-height: 1.5;
+            padding: 0.7rem 1.05rem 0.2rem;
+        }
+
+        .trace-stages {
+            counter-reset: trace-step;
+            padding: 0.4rem 1.05rem 0.9rem;
+            position: relative;
+        }
+
+        /* vertical connector running through the numbered steps */
+        .trace-stages::before {
+            background: var(--line-strong);
+            bottom: 1.7rem;
+            content: "";
+            left: calc(1.05rem + 0.86rem);
+            position: absolute;
+            top: 1.4rem;
+            width: 2px;
+            z-index: 0;
+        }
+
+        .trace-stage {
+            padding: 0.7rem 0 0.7rem 2.55rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        .trace-stage-head {
+            align-items: center;
+            display: flex;
+            gap: 0.55rem;
+        }
+
+        .trace-step-no {
+            align-items: center;
+            background: var(--surface);
+            border: 2px solid var(--line-strong);
+            border-radius: 50%;
+            color: var(--accent);
+            display: inline-flex;
+            font-size: 0.78rem;
+            font-weight: 780;
+            height: 1.72rem;
+            justify-content: center;
+            left: 0;
+            position: absolute;
+            top: 0.62rem;
+            width: 1.72rem;
+        }
+
+        .trace-stage-name {
+            color: var(--text);
+            flex: 1 1 auto;
+            font-family: var(--serif);
+            font-size: 1.02rem;
+            font-weight: 600;
+        }
+
+        .stage-badge {
+            align-items: center;
+            border-radius: 999px;
+            display: inline-flex;
+            font-size: 0.66rem;
+            font-weight: 740;
+            gap: 0.34rem;
+            letter-spacing: 0.03em;
+            padding: 0.22rem 0.58rem;
+            text-transform: uppercase;
+        }
+
+        .stage-badge .status-dot {
+            box-shadow: none;
+        }
+
+        .stage-badge--live {
+            background: var(--accent-soft);
+            color: var(--accent);
+        }
+
+        .stage-badge--live .status-dot {
+            background: var(--accent);
+        }
+
+        .stage-badge--heuristic {
+            background: var(--surface-soft);
+            color: var(--muted);
+        }
+
+        .stage-badge--heuristic .status-dot {
+            background: var(--muted);
+        }
+
+        .trace-note {
+            color: #6b5d48;
+            font-size: 0.84rem;
+            line-height: 1.5;
+            margin-top: 0.35rem;
+        }
+
+        .trace-body {
+            color: #5f5340;
+            font-size: 0.84rem;
+            line-height: 1.55;
+            margin-top: 0.6rem;
+        }
+
+        .trace-line {
+            overflow-wrap: anywhere;
+            padding: 0.16rem 0;
+        }
+
+        .trace-head {
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 700;
+            margin-bottom: 0.15rem;
+            text-transform: uppercase;
+        }
+
+        .trace-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.34rem;
+            margin-top: 0.1rem;
+        }
+
+        .trace-chip {
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            color: #4a4031;
+            font-size: 0.74rem;
+            font-weight: 620;
+            padding: 0.18rem 0.55rem;
+        }
+
+        .trace-chip--avoid {
+            color: var(--muted);
+            text-decoration: line-through;
+            text-decoration-thickness: 1px;
+        }
+
+        .trace-strength {
+            background: var(--accent-soft);
+            border-radius: 6px;
+            color: var(--accent);
+            font-size: 0.72rem;
+            font-weight: 740;
+            padding: 0.1rem 0.4rem;
+            white-space: nowrap;
+        }
+
+        .trace-rank {
+            background: var(--ink);
+            border-radius: 5px;
+            color: #fbf6ec;
+            display: inline-block;
+            font-size: 0.72rem;
+            font-weight: 760;
+            min-width: 1.1rem;
+            padding: 0.04rem 0.3rem;
+            text-align: center;
+        }
+
+        .trace-book {
+            color: var(--text);
+            font-weight: 680;
+        }
+
+        .trace-flag {
+            color: var(--muted);
+            font-size: 0.76rem;
+            font-style: italic;
+        }
+
+        .clarify-hint {
+            color: var(--muted);
+            font-size: 0.84rem;
+            line-height: 1.5;
+            margin-top: 0.7rem;
+        }
+
+        /* --- pending stage-progress strip --- */
+        .stage-progress {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            margin: 0.7rem 0 0.2rem;
+        }
+
+        .stage-pill {
+            align-items: center;
+            background: var(--surface-soft);
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            color: #4a4031;
+            display: inline-flex;
+            font-size: 0.74rem;
+            font-weight: 720;
+            gap: 0.4rem;
+            padding: 0.26rem 0.62rem;
+        }
+
+        .stage-pill-dot {
+            animation: thinking-bounce 1.2s infinite ease-in-out;
+            background: var(--accent);
+            border-radius: 50%;
+            height: 0.42rem;
+            width: 0.42rem;
+        }
+
+        .stage-pill:nth-child(2) .stage-pill-dot {
+            animation-delay: 0.18s;
+        }
+
+        .stage-pill:nth-child(3) .stage-pill-dot {
+            animation-delay: 0.36s;
+        }
+
         @media (prefers-reduced-motion: reduce) {
             .book-hero,
             .leaf,
             .center-stage,
             .img-leaf,
             .art-left img,
-            .art-right img {
+            .art-right img,
+            .stage-pill-dot {
                 animation: none !important;
             }
 
             .leaf-2 { transform: rotateY(-28deg); }
             .leaf-3 { transform: rotateY(-150deg); }
             .img-leaf { display: none; }
+        }
+
+        /* ===================== Premium chat polish ===================== */
+        /* Slightly airier thread + crisper reading rhythm. */
+        .chat-thread {
+            gap: 2.1rem;
+        }
+
+        .chat-title {
+            letter-spacing: -0.015em;
+        }
+
+        .chat-subtitle {
+            color: #6b5d48;
+        }
+
+        /* Assistant identity — a warm gradient medallion with a soft ring. */
+        .assistant-avatar {
+            background: linear-gradient(150deg, #6b4423 0%, var(--ink) 100%);
+            box-shadow:
+                0 4px 12px rgba(42, 33, 24, 0.26),
+                0 0 0 3px rgba(163, 84, 33, 0.10);
+            font-family: var(--serif);
+            letter-spacing: 0.01em;
+        }
+
+        .assistant-name {
+            letter-spacing: 0.01em;
+        }
+
+        /* User turn — a soft, layered paper bubble. */
+        .bubble-user {
+            background: linear-gradient(180deg, #f1e6d1 0%, #ece0ca 100%);
+            border: 1px solid var(--paper-edge);
+            border-radius: 1.5rem 1.5rem 0.5rem 1.5rem;
+            box-shadow: 0 2px 8px rgba(74, 54, 32, 0.08);
+        }
+
+        /* Pick cards — layered depth, soft inner highlight, lifted hover. */
+        .pick-card {
+            background: linear-gradient(180deg, #fdf9f0 0%, var(--surface) 100%);
+            border-color: var(--line);
+            border-radius: 16px;
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.6) inset,
+                0 6px 18px rgba(74, 54, 32, 0.07);
+            padding: 1.15rem 1.25rem;
+            transition: border-color 180ms ease, box-shadow 180ms ease,
+                transform 180ms ease;
+        }
+
+        .pick-card:hover {
+            border-color: var(--line-strong);
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.6) inset,
+                0 18px 40px rgba(74, 54, 32, 0.16);
+            transform: translateY(-2px);
+        }
+
+        .pick-rank {
+            background: linear-gradient(150deg, #6b4423 0%, var(--ink) 100%);
+            box-shadow:
+                0 4px 12px rgba(42, 33, 24, 0.24),
+                0 0 0 3px rgba(163, 84, 33, 0.08);
+        }
+
+        /* The "why it ranks here" line — a tinted, inset rationale chip. */
+        .pick-why {
+            background: linear-gradient(180deg, #fbeedd 0%, var(--accent-soft) 100%);
+            border-left: 2px solid var(--accent);
+            border-radius: 0 9px 9px 0;
+            margin-top: 0.8rem;
+            padding: 0.55rem 0.75rem;
+        }
+
+        .pick-why-label {
+            letter-spacing: 0.07em;
+        }
+
+        /* Reasoning disclosure — quieter, rounder, premium. */
+        .reasoning-trace {
+            border-radius: 16px;
+        }
+
+        .reasoning-trace > summary {
+            font-weight: 640;
+            letter-spacing: 0.01em;
+        }
+
+        /* Composer — gradient surface, layered shadow, accent focus ring. */
+        .st-key-chat_composer {
+            background: linear-gradient(180deg, #fffdf8 0%, var(--surface) 100%);
+            border-color: var(--line);
+            border-radius: 28px;
+            box-shadow:
+                0 1px 0 rgba(255, 255, 255, 0.7) inset,
+                0 2px 6px rgba(74, 54, 32, 0.06),
+                0 24px 60px rgba(74, 54, 32, 0.12);
+            padding: 0.7rem 0.85rem 0.75rem;
+        }
+
+        .st-key-chat_composer:focus-within {
+            border-color: var(--accent);
+            box-shadow:
+                0 0 0 3px rgba(163, 84, 33, 0.12),
+                0 26px 72px rgba(163, 84, 33, 0.18);
+        }
+
+        .st-key-chat_composer div[data-testid="stTextArea"] textarea::placeholder {
+            color: #ab9d85;
+        }
+
+        .st-key-chat_composer div[data-baseweb="select"] > div {
+            background: var(--surface-soft) !important;
+            border-color: var(--line) !important;
+            box-shadow: none !important;
+        }
+
+        /* Send — circular premium primary with a confident lift. */
+        .st-key-chat_composer div[data-testid="column"]:last-child .stButton > button {
+            background: linear-gradient(180deg, #3a2c1c 0%, var(--ink) 100%) !important;
+            border: 0 !important;
+            border-radius: 999px !important;
+            box-shadow: 0 6px 18px rgba(42, 33, 24, 0.26);
+            color: #fbf6ec !important;
+            font-weight: 760 !important;
+            letter-spacing: 0.02em;
+            transition: transform 150ms ease, box-shadow 150ms ease,
+                filter 150ms ease;
+        }
+
+        .st-key-chat_composer div[data-testid="column"]:last-child
+            .stButton > button:hover:not(:disabled) {
+            box-shadow: 0 10px 28px rgba(42, 33, 24, 0.34);
+            filter: brightness(1.07);
+            transform: translateY(-1px);
+        }
+
+        .st-key-chat_composer div[data-testid="column"]:last-child
+            .stButton > button:disabled {
+            box-shadow: none;
+            opacity: 0.45;
+        }
+
+        /* Suggestion chips — refined, responsive hover. */
+        .st-key-chat_suggestions .stButton > button {
+            transition: transform 150ms ease, box-shadow 150ms ease,
+                border-color 150ms ease;
+        }
+
+        .st-key-chat_suggestions .stButton > button:hover {
+            border-color: var(--accent) !important;
+            box-shadow: 0 12px 30px rgba(74, 54, 32, 0.14) !important;
+            transform: translateY(-1px);
         }
         </style>
         """,
@@ -1345,21 +1929,47 @@ def render_recommendation_cards(recs, books) -> None:
         "average_rating",
         "ratings_count",
     ]
+    # Pull the cover-image link straight from the catalog when present (the
+    # assignment dataset ships Goodreads `small_image_url`/`image_url`; the
+    # synthetic sample has neither, so we fall back to a placeholder tile).
+    for col in ("small_image_url", "image_url"):
+        if col in books.columns and col not in meta_cols:
+            meta_cols.append(col)
     display = recs.merge(books[meta_cols], on="book_id", how="left")
 
     cards = ['<div class="rec-list">']
     for rank, row in enumerate(display.itertuples(index=False), start=1):
-        title = escape(safe_text(getattr(row, "title", None), "Untitled"))
-        authors = escape(safe_text(getattr(row, "authors", None), "Unknown author"))
+        title_raw = safe_text(getattr(row, "title", None), "Untitled")
+        authors_raw = safe_text(getattr(row, "authors", None), "Unknown author")
+        title = escape(title_raw)
+        authors = escape(authors_raw)
         year = escape(format_year(getattr(row, "original_publication_year", None)))
         avg = format_score(getattr(row, "average_rating", None))
         rating_count = escape(format_number(getattr(row, "ratings_count", None)))
         score = escape(format_score(getattr(row, "score", None)))
+        cover = safe_text(getattr(row, "small_image_url", None)) or safe_text(
+            getattr(row, "image_url", None)
+        )
+        # Same cover + Goodreads link treatment as the chat pick cards.
+        link = escape(_goodreads_url(cover, title_raw, authors_raw))
+        if cover.startswith("http"):
+            cover_inner = (
+                f'<img class="rec-cover" src="{escape(cover)}" alt="" '
+                f'loading="lazy" referrerpolicy="no-referrer">'
+            )
+        else:
+            cover_inner = (
+                '<span class="rec-cover rec-cover--empty" aria-hidden="true">📖</span>'
+            )
         cards.append(
             f'<article class="rec-card">'
             f'<div class="rank">{rank}</div>'
+            f'<a class="rec-cover-link" href="{link}" target="_blank" '
+            f'rel="noopener noreferrer">{cover_inner}</a>'
             f'<div>'
-            f'<div class="rec-title">{title}</div>'
+            f'<div class="rec-title">'
+            f'<a class="rec-title-link" href="{link}" target="_blank" '
+            f'rel="noopener noreferrer">{title}</a></div>'
             f'<div class="rec-author">{authors}</div>'
             f'<div class="rec-meta">'
             f'<span>{year}</span>'
@@ -1374,11 +1984,206 @@ def render_recommendation_cards(recs, books) -> None:
     st.markdown("\n".join(cards), unsafe_allow_html=True)
 
 
-def render_assistant_message(message) -> str:
-    """Build the HTML for one assistant turn (a re-ranked shortlist)."""
-    picks = message.get("picks", [])
-    pref = escape(safe_text(message.get("pref"), "your request"))
-    lead = "Refined the shortlist" if message.get("refine") else "Here is your shortlist"
+def render_intent_chips(intent) -> str:
+    """A row of pills summarizing the DAG's extracted intent (Stage A).
+
+    `intent` is the asdict() of rag_pipeline.Intent. Returns "" when there is
+    nothing meaningful to show so old messages stay clean.
+    """
+    if not intent:
+        return ""
+    chips = []
+    mood = safe_text(intent.get("mood"))
+    if mood:
+        chips.append(f'<span class="intent-chip">{escape(mood)}</span>')
+    pace = safe_text(intent.get("pace"))
+    if pace and pace.lower() != "any":
+        chips.append(f'<span class="intent-chip">{escape(pace)} pace</span>')
+    recency = safe_text(intent.get("recency"))
+    if recency and recency.lower() != "any":
+        chips.append(f'<span class="intent-chip">{escape(recency)}</span>')
+    for genre in (intent.get("genres") or [])[:3]:
+        label = safe_text(genre)
+        if label:
+            chips.append(f'<span class="intent-chip">{escape(label)}</span>')
+    for theme in (intent.get("themes") or [])[:2]:
+        label = safe_text(theme)
+        if label:
+            chips.append(f'<span class="intent-chip">{escape(label)}</span>')
+    for avoid in (intent.get("avoid") or [])[:3]:
+        label = safe_text(avoid)
+        if label:
+            chips.append(
+                f'<span class="intent-chip intent-chip--avoid">no {escape(label)}</span>'
+            )
+    if not chips:
+        return ""
+    return '<div class="intent-row">' + "".join(chips) + "</div>"
+
+
+def _match_strength(value) -> str:
+    """Turn a 0..1 relevance score into a plain-language match label."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = 0.0
+    if score >= 0.66:
+        return "Strong match"
+    if score >= 0.33:
+        return "Fair match"
+    return "Light match"
+
+
+def _chip_line(label: str) -> str:
+    return f'<span class="trace-chip">{escape(label)}</span>'
+
+
+def _trace_output_summary(name: str, output: dict) -> str:
+    """Plain-language view of one step's result, written for a general reader."""
+    if not output:
+        return ""
+    if name == "Understand your request":
+        chips = []
+        mood = safe_text(output.get("mood"))
+        if mood:
+            chips.append(_chip_line(mood))
+        for key in ("pace", "recency"):
+            val = safe_text(output.get(key))
+            if val and val.lower() != "any":
+                chips.append(_chip_line(f"{val} {key}" if key == "pace" else val))
+        for genre in (output.get("genres") or []):
+            label = safe_text(genre)
+            if label:
+                chips.append(_chip_line(label))
+        for theme in (output.get("themes") or [])[:3]:
+            label = safe_text(theme)
+            if label:
+                chips.append(_chip_line(label))
+        for avoid in (output.get("avoid") or []):
+            label = safe_text(avoid)
+            if label:
+                chips.append(
+                    f'<span class="trace-chip trace-chip--avoid">avoid {escape(label)}</span>'
+                )
+        if not chips:
+            return '<div class="trace-line">Nothing specific yet — we’ll ask a quick question.</div>'
+        return '<div class="trace-chips">' + "".join(chips) + "</div>"
+    if name == "Check we have enough":
+        if output.get("question"):
+            q = safe_text(output.get("question"))
+            opts = [safe_text(o) for o in (output.get("options") or []) if safe_text(o)]
+            rows = [f'<div class="trace-line">We asked: <em>“{escape(q)}”</em></div>']
+            if opts:
+                rows.append(
+                    '<div class="trace-chips">'
+                    + "".join(_chip_line(o) for o in opts)
+                    + "</div>"
+                )
+            return "".join(rows)
+        return '<div class="trace-line">Enough detail to go on — moving to the books.</div>'
+    if name == "Rate every book":
+        rows = []
+        for s in output.get("scored", [])[:6]:
+            title = safe_text(s.get("title")) or f"Book #{safe_text(s.get('book_id'))}"
+            strength = _match_strength(s.get("relevance"))
+            reason = safe_text(s.get("reason"))
+            flags = [safe_text(f) for f in (s.get("flags") or []) if safe_text(f)]
+            line = (
+                f'<span class="trace-strength">{escape(strength)}</span> '
+                f'<span class="trace-book">{escape(title)}</span>'
+            )
+            if reason:
+                line += f' — {escape(reason)}'
+            if flags:
+                line += ' <span class="trace-flag">set aside: '
+                line += escape(", ".join(f.replace("avoid:", "") for f in flags))
+                line += "</span>"
+            rows.append(f'<div class="trace-line">{line}</div>')
+        head = (
+            f'We rated {output.get("count", len(rows))} books — '
+            f'showing the {len(rows)} strongest:'
+        )
+        return f'<div class="trace-line trace-head">{escape(head)}</div>' + "".join(rows)
+    if name == "Pick the final list":
+        rows = []
+        for i, p in enumerate(output.get("picks", []), start=1):
+            title = safe_text(p.get("title"), "Untitled")
+            desc = safe_text(p.get("description"))
+            why = safe_text(p.get("explanation"))
+            line = (
+                f'<span class="trace-rank">{i}</span> '
+                f'<span class="trace-book">{escape(title)}</span>'
+            )
+            if desc:
+                line += f' — {escape(desc)}'
+            if why:
+                line += f' <span class="trace-flag">Why: {escape(why)}</span>'
+            rows.append(f'<div class="trace-line">{line}</div>')
+        return "".join(rows)
+    return ""
+
+
+# Map the pipeline's internal stage names to reader-friendly step titles.
+TRACE_STEP_NAMES = {
+    "Intent": "Understand your request",
+    "Clarify": "Check we have enough",
+    "Scoring": "Rate every book",
+    "Re-rank": "Pick the final list",
+}
+
+
+def render_reasoning_trace(trace) -> str:
+    """A collapsible step-by-step explanation of how the shortlist was built.
+
+    `trace` is a list of asdict() rag_pipeline.StageTrace dicts. Native HTML
+    <details>, so it works inside st.markdown with no JS. Returns "" when absent.
+    Written for a non-technical reader: numbered steps, plain notes, and an
+    "AI" vs "Smart rules" badge instead of LLM jargon.
+    """
+    if not trace:
+        return ""
+    stages = []
+    for i, stage in enumerate(trace, start=1):
+        raw_name = safe_text(stage.get("name"), "Stage")
+        name = TRACE_STEP_NAMES.get(raw_name, raw_name)
+        used_llm = bool(stage.get("used_llm"))
+        badge_cls = "stage-badge--live" if used_llm else "stage-badge--heuristic"
+        badge_text = "AI" if used_llm else "Smart rules"
+        note = escape(safe_text(stage.get("note")))
+        body = _trace_output_summary(name, stage.get("output") or {})
+        body_html = f'<div class="trace-body">{body}</div>' if body else ""
+        stages.append(
+            f'<div class="trace-stage">'
+            f'<div class="trace-stage-head">'
+            f'<span class="trace-step-no">{i}</span>'
+            f'<span class="trace-stage-name">{escape(name)}</span>'
+            f'<span class="stage-badge {badge_cls}">'
+            f'<span class="status-dot"></span>{badge_text}</span>'
+            f'</div>'
+            f'<div class="trace-note">{note}</div>'
+            f'{body_html}'
+            f'</div>'
+        )
+    count = len(trace)
+    return (
+        f'<details class="reasoning-trace">'
+        f'<summary>How we chose these · {count} steps</summary>'
+        f'<div class="trace-intro">A quick look at how BookRec went from your '
+        f'message to this shortlist.</div>'
+        f'<div class="trace-stages">' + "".join(stages) + '</div>'
+        f'</details>'
+    )
+
+
+def render_clarify_message(message) -> str:
+    """Build the HTML for an assistant turn that asks a clarifying question.
+
+    Shows the question as the lead plus the intent chips for what we already
+    understood. The tappable options are rendered as real Streamlit buttons in
+    the composer area, not here.
+    """
+    intent = message.get("intent") or {}
+    question = escape(safe_text(message.get("question_text"), "Could you tell me a bit more?"))
     source = escape(safe_text(message.get("source"), ""))
 
     parts = [
@@ -1386,28 +2191,12 @@ def render_assistant_message(message) -> str:
         '<div class="assistant-avatar">B</div>',
         '<div class="assistant-body">',
         '<div class="assistant-name">BookRec</div>',
-        f'<div class="assistant-lead">{lead} for &ldquo;{pref}&rdquo;.</div>',
-        '<div class="pick-list">',
+        f'<div class="assistant-lead">{question}</div>',
+        render_intent_chips(intent),
+        '<div class="clarify-hint">Choose an option below, type your own answer, '
+        'or skip straight to recommendations.</div>',
+        render_reasoning_trace(message.get("trace")),
     ]
-    if picks:
-        for rank, pick in enumerate(picks, start=1):
-            title = escape(safe_text(pick.title, "Untitled"))
-            authors = escape(safe_text(pick.authors, "Unknown author"))
-            why = escape(safe_text(pick.explanation, "Ranked for this preference."))
-            parts.append(
-                f'<article class="pick-card">'
-                f'<div class="pick-label">Pick {rank}</div>'
-                f'<div class="pick-title">{title} '
-                f'<span class="rec-author">by {authors}</span></div>'
-                f'<div class="pick-why">{why}</div>'
-                f'</article>'
-            )
-    else:
-        parts.append(
-            '<div class="pick-why">No candidates matched closely enough. '
-            'Try regenerating candidates or loosening the filters above.</div>'
-        )
-    parts.append("</div>")  # pick-list
     if source:
         parts.append(f'<div class="assistant-meta">Source: {source}</div>')
     parts.append("</div>")  # assistant-body
@@ -1415,7 +2204,134 @@ def render_assistant_message(message) -> str:
     return "\n".join(parts)
 
 
-def render_chat_thread(messages, pending: bool = False) -> None:
+def _goodreads_url(cover_url, title, authors):
+    """Best-effort link to the book's Goodreads page.
+
+    The Goodreads cover filename is the goodreads_book_id (e.g.
+    ``.../books/1447303603s/2767052.jpg`` -> 2767052), which gives a direct book
+    page. When the cover is a generic placeholder (no numeric id), fall back to a
+    Goodreads search by title + author so the link always works.
+    """
+    match = re.search(r"/(\d+)\.[a-zA-Z]+$", cover_url or "")
+    if match:
+        return f"https://www.goodreads.com/book/show/{match.group(1)}"
+    query = urllib.parse.quote_plus(f"{title} {authors}".strip())
+    return f"https://www.goodreads.com/search?q={query}"
+
+
+@st.cache_data
+def book_media_lookup(books):
+    """Map book_id -> {"cover": <url or "">, "url": <goodreads link>}.
+
+    Lets the chat pick cards show the same cover thumbnail (from the catalog's
+    image link) and link out to Goodreads, working from just the pick's book_id.
+    """
+    cover_col = next(
+        (c for c in ("small_image_url", "image_url") if c in books.columns), None
+    )
+    out = {}
+    for row in books.itertuples(index=False):
+        cover = safe_text(getattr(row, cover_col, "")) if cover_col else ""
+        out[getattr(row, "book_id")] = {
+            "cover": cover,
+            "url": _goodreads_url(
+                cover,
+                safe_text(getattr(row, "title", "")),
+                safe_text(getattr(row, "authors", "")),
+            ),
+        }
+    return out
+
+
+def render_assistant_message(message, book_meta=None) -> str:
+    """Build the HTML for one assistant turn (a re-ranked shortlist)."""
+    if message.get("kind") == "clarify":
+        return render_clarify_message(message)
+    book_meta = book_meta or {}
+    picks = message.get("picks", [])
+    intent = message.get("intent") or {}
+    lead_text = safe_text(intent.get("summary"))
+    if not lead_text:
+        pref = safe_text(message.get("pref"), "your request")
+        verb = "Refined the shortlist" if message.get("refine") else "Here is your shortlist"
+        lead_text = f"{verb} for “{pref}”."
+    lead = escape(lead_text)
+    source = escape(safe_text(message.get("source"), ""))
+
+    parts = [
+        '<div class="msg msg-assistant">',
+        '<div class="assistant-avatar">B</div>',
+        '<div class="assistant-body">',
+        '<div class="assistant-name">BookRec</div>',
+        f'<div class="assistant-lead">{lead}</div>',
+        render_intent_chips(intent),
+        '<div class="pick-list">',
+    ]
+    if picks:
+        for rank, pick in enumerate(picks, start=1):
+            title = escape(safe_text(pick.title, "Untitled"))
+            authors = escape(safe_text(pick.authors, "Unknown author"))
+            why = escape(safe_text(pick.explanation, "Ranked for this preference."))
+            # description is the NEW contract field — one neutral sentence about
+            # the book itself. May be empty for older/edge picks, so only render
+            # the line when it is populated.
+            desc = safe_text(getattr(pick, "description", ""))
+            desc_html = (
+                f'<div class="pick-desc">{escape(desc)}</div>' if desc else ""
+            )
+            # Cover thumbnail + Goodreads link, looked up by the pick's book_id.
+            media = book_meta.get(getattr(pick, "book_id", None), {})
+            cover = safe_text(media.get("cover", ""))
+            link = safe_text(media.get("url", ""))
+            if cover.startswith("http"):
+                cover_inner = (
+                    f'<img class="pick-cover-img" src="{escape(cover)}" alt="" '
+                    f'loading="lazy" referrerpolicy="no-referrer">'
+                )
+            else:
+                cover_inner = (
+                    '<span class="pick-cover-img pick-cover--empty" '
+                    'aria-hidden="true">📖</span>'
+                )
+            if link.startswith("http"):
+                cover_html = (
+                    f'<a class="pick-cover" href="{escape(link)}" target="_blank" '
+                    f'rel="noopener noreferrer">{cover_inner}</a>'
+                )
+                title_html = (
+                    f'<a class="pick-title-link" href="{escape(link)}" '
+                    f'target="_blank" rel="noopener noreferrer">{title}</a>'
+                )
+            else:
+                cover_html = f'<div class="pick-cover">{cover_inner}</div>'
+                title_html = title
+            parts.append(
+                f'<article class="pick-card">'
+                f'<div class="pick-rank">{rank}</div>'
+                f'{cover_html}'
+                f'<div class="pick-title">{title_html}'
+                f'<span class="pick-author"> by {authors}</span></div>'
+                f'{desc_html}'
+                f'<div class="pick-why">'
+                f'<span class="pick-why-label">Why #{rank}</span>{why}'
+                f'</div>'
+                f'</article>'
+            )
+    else:
+        parts.append(
+            '<div class="pick-empty">No candidates matched closely enough. '
+            'Try regenerating candidates or loosening the filters above.</div>'
+        )
+    parts.append("</div>")  # pick-list
+    parts.append(render_reasoning_trace(message.get("trace")))
+    if source:
+        parts.append(f'<div class="assistant-meta">Source: {source}</div>')
+    parts.append("</div>")  # assistant-body
+    parts.append("</div>")  # msg
+    return "\n".join(parts)
+
+
+def render_chat_thread(messages, pending: bool = False, book_meta=None) -> None:
     """Render the full conversation as alternating user / assistant turns."""
     parts = ['<div class="chat-thread">']
     for message in messages:
@@ -1426,13 +2342,19 @@ def render_chat_thread(messages, pending: bool = False) -> None:
                 '</div>'
             )
         else:
-            parts.append(render_assistant_message(message))
+            parts.append(render_assistant_message(message, book_meta))
     if pending:
+        stage_pills = "".join(
+            f'<span class="stage-pill"><span class="stage-pill-dot"></span>{label}</span>'
+            for label in ("Reading your request", "Rating the books", "Choosing the best")
+        )
         parts.append(
             '<div class="msg msg-assistant">'
             '<div class="assistant-avatar">B</div>'
             '<div class="assistant-body">'
             '<div class="assistant-name">BookRec</div>'
+            '<div class="assistant-lead">Working through your request…</div>'
+            f'<div class="stage-progress">{stage_pills}</div>'
             '<div class="thinking"><span></span><span></span><span></span></div>'
             '</div>'
             '</div>'
@@ -1446,6 +2368,185 @@ def load_data(source: str):
     if source == SOURCE_SAMPLE:
         return data_loader.load_sample()
     return data_loader.load("data")
+
+
+def auto_reader(ratings):
+    """Pick a sensible default reader for UBCF: the most active rater.
+
+    The reader is no longer a primary control — UBCF still needs a user to
+    personalize for, so we default to the reader with the richest history (the
+    most signal for the model). The chat does the real personalization on top.
+    """
+    return ratings["user_id"].value_counts().idxmax()
+
+
+def _split_values(series):
+    """Yield individual comma-split, stripped values from a string column."""
+    for cell in series.dropna():
+        for part in str(cell).split(","):
+            value = part.strip()
+            if value:
+                yield value
+
+
+@st.cache_data
+def author_options(books):
+    """Sorted unique individual authors (comma-split), dropping blanks/Unknown."""
+    authors = {
+        a for a in _split_values(books.get("authors", pd.Series(dtype=str)))
+        if a and a != "Unknown"
+    }
+    return sorted(authors)
+
+
+# A decade needs at least this many books to stand alone as a filter option;
+# the run of sparser early decades is collapsed into one "Before <cutoff>s" bin
+# so the UBCF candidate pool for any selected period is never trivially small.
+MIN_DECADE_BOOKS = 50
+
+
+@st.cache_data
+def decade_options(books):
+    """Decade labels for the filter — individual recent decades, sparse old ones binned.
+
+    Decades with enough books (>= MIN_DECADE_BOOKS) are listed individually
+    (e.g. "1990s"). The leading run of sparse early decades is collapsed into a
+    single "Before <cutoff>s" option (cutoff = the first dense decade), so any
+    selected period always has enough candidates for the collaborative filter.
+    Falls back to listing every decade when there is no meaningful split (e.g.
+    the small synthetic sample).
+    """
+    years = pd.to_numeric(
+        books.get("original_publication_year", pd.Series(dtype=float)),
+        errors="coerce",
+    ).dropna()
+    years = years[years > 0]
+    if years.empty:
+        return []
+    counts = (years // 10 * 10).astype(int).value_counts()
+    decades = sorted(counts.index)
+    dense = [d for d in decades if counts[d] >= MIN_DECADE_BOOKS]
+    if len(dense) < 2 or dense[0] == decades[0]:
+        # Nothing sparse to collapse — list every decade individually.
+        return [f"{d}s" for d in decades]
+    cutoff = dense[0]
+    return [f"Before {cutoff}s"] + [f"{d}s" for d in decades if d >= cutoff]
+
+
+@st.cache_data
+def genre_options(books):
+    """Sorted unique genres (comma-split) if a non-empty `genre` column exists, else []."""
+    if "genre" not in books.columns:
+        return []
+    genres = {g for g in _split_values(books["genre"]) if g}
+    return sorted(genres)
+
+
+def filter_book_ids(books, authors=None, decades=None, genres=None):
+    """Restrict the catalog by author/decade/genre.
+
+    Returns None when nothing is selected (a true no-op for the caller). When any
+    group is active, builds a vectorized boolean mask: AND across active groups,
+    OR within a group (a book matches a group if ANY of its split values is
+    selected). Returns set(book_id) of the surviving rows.
+    """
+    authors = authors or []
+    decades = decades or []
+    genres = genres or []
+    if not authors and not decades and not genres:
+        return None
+
+    mask = pd.Series(True, index=books.index)
+
+    if authors:
+        wanted = set(authors)
+        author_split = books.get("authors", pd.Series("", index=books.index)).fillna("")
+        author_mask = author_split.apply(
+            lambda cell: any(
+                part.strip() in wanted for part in str(cell).split(",")
+            )
+        )
+        mask &= author_mask
+
+    if decades:
+        # Decade labels are either an exact decade ("1990s") or the collapsed
+        # "Before <cutoff>s" bin; handle both (and any combination of them).
+        exact_decades = set()
+        before_cutoff = None
+        for d in decades:
+            label = str(d)
+            if label.startswith("Before "):
+                try:
+                    before_cutoff = int(label.replace("Before ", "").rstrip("s"))
+                except ValueError:
+                    pass
+            else:
+                try:
+                    exact_decades.add(int(label.rstrip("s")))
+                except ValueError:
+                    pass
+        years = pd.to_numeric(
+            books.get("original_publication_year", pd.Series(0, index=books.index)),
+            errors="coerce",
+        ).fillna(0)
+        decade_mask = (years // 10 * 10).astype(int).isin(exact_decades) & (years > 0)
+        if before_cutoff is not None:
+            decade_mask = decade_mask | ((years > 0) & (years < before_cutoff))
+        mask &= decade_mask
+
+    if genres and "genre" in books.columns:
+        wanted_genres = set(genres)
+        genre_mask = books["genre"].fillna("").apply(
+            lambda cell: any(
+                part.strip() in wanted_genres for part in str(cell).split(",")
+            )
+        )
+        mask &= genre_mask
+
+    return set(books.loc[mask, "book_id"])
+
+
+@st.cache_data
+def dataset_insights(ratings, books):
+    """Aggregates for the EDA / insights section (cached per dataset).
+
+    Surfaces the patterns that actually shape modeling on this data: the
+    positivity bias in ratings, the popularity long tail, the active-vs-casual
+    reader skew, sparsity, and the modern-skewed catalog.
+    """
+    out = {}
+    out["rating_dist"] = (
+        ratings["rating"].round(1).value_counts().sort_index().rename("ratings")
+    )
+    out["mean_rating"] = float(ratings["rating"].mean())
+    out["pct_4plus"] = float((ratings["rating"] >= 4).mean())
+
+    per_user = ratings.groupby("user_id").size()
+    out["per_user_median"] = int(per_user.median())
+    out["per_user_mean"] = float(per_user.mean())
+    out["per_user_max"] = int(per_user.max())
+
+    per_book = ratings.groupby("book_id").size().sort_values(ascending=False)
+    out["per_book_median"] = int(per_book.median())
+    top10pct_n = max(1, int(len(per_book) * 0.10))
+    out["top10pct_share"] = float(per_book.head(top10pct_n).sum() / per_book.sum())
+
+    top = per_book.head(10).rename("ratings").reset_index().merge(
+        books[["book_id", "title", "authors", "average_rating"]],
+        on="book_id", how="left",
+    )
+    out["top_books"] = top[["title", "authors", "ratings", "average_rating"]]
+
+    years = pd.to_numeric(books["original_publication_year"], errors="coerce")
+    years = years[years > 0]
+    decade_counts = (years // 10 * 10).astype(int).value_counts().sort_index()
+    decade_counts.index = [f"{d}s" for d in decade_counts.index]
+    out["decade_dist"] = decade_counts.rename("books")
+
+    out["sparsity"] = 1 - len(ratings) / (
+        ratings["user_id"].nunique() * ratings["book_id"].nunique()
+    )
+    return out
 
 
 @st.cache_resource
@@ -1485,34 +2586,24 @@ class ScoreAdapter:
         return self.model.predict_for_user(user_id, candidate_ids)
 
 
-def compose_preference(user_turns) -> str:
-    """Fold the whole conversation into one preference string for the re-ranker.
+def submit_chat_message(prompt: str, top_k: int, skip_clarify: bool = False) -> None:
+    """Append the user's turn and queue an assistant reply for the next run.
 
-    The first turn is the base request; later turns are refinements applied in
-    order. This lets a single rerank() call stay conversation-aware without the
-    LLM ever inventing books outside the candidate set.
+    ``skip_clarify`` powers the "Just recommend something" escape hatch — it tells
+    the DAG to bypass the clarifying-question gate and rank immediately.
     """
-    base = user_turns[0].strip()
-    if len(user_turns) == 1:
-        return base
-    refinements = "; ".join(turn.strip() for turn in user_turns[1:])
-    return (
-        f"{base}. The reader then refined the request (apply in order, newest "
-        f"last): {refinements}. Keep the original intent but prioritize the most "
-        f"recent refinement."
-    )
-
-
-def submit_chat_message(prompt: str, top_k: int) -> None:
-    """Append the user's turn and queue an assistant reply for the next run."""
     messages = st.session_state.setdefault("chat_messages", [])
     messages.append({"role": "user", "content": prompt})
-    st.session_state["chat_pending"] = {"top_k": top_k}
+    st.session_state["chat_pending"] = {"top_k": top_k, "skip_clarify": skip_clarify}
     st.session_state["clear_chat_input"] = True
 
 
 def resolve_pending_chat(books) -> None:
-    """Run the conversation-aware RAG re-rank for the queued user turn."""
+    """Run the conversation-aware RAG re-rank for the queued user turn.
+
+    The DAG may pause at its clarify gate and return a question instead of picks;
+    we append either a ``kind:"clarify"`` or a ``kind:"recommend"`` assistant turn.
+    """
     pending = st.session_state.get("chat_pending")
     if not pending:
         return
@@ -1524,25 +2615,45 @@ def resolve_pending_chat(books) -> None:
     if recs is None or not user_turns:
         return
 
-    preference = compose_preference(user_turns)
-    cands = llm_rerank.candidates_from_recs(recs, books)
-    picks, used_llm = llm_rerank.rerank(cands, preference, top_k=pending["top_k"])
+    # How many clarifying questions we've already asked this conversation; the
+    # gate stops asking once it hits the pipeline's max-rounds cap.
+    rounds_asked = sum(1 for m in messages if m.get("kind") == "clarify")
 
-    if used_llm:
-        source = f"Gemini · {llm_rerank.DEFAULT_MODEL}"
-    else:
-        source = "Heuristic fallback"
-        if not os.environ.get("GEMINI_API_KEY"):
-            source += " (set GEMINI_API_KEY for live LLM re-ranking)"
+    cands = llm_rerank.candidates_from_recs(recs, books)
+    result = rag_pipeline.run_pipeline(
+        user_turns,
+        cands,
+        top_k=pending["top_k"],
+        rounds_asked=rounds_asked,
+        skip_clarify=pending.get("skip_clarify", False),
+    )
+
+    if result.question is not None:
+        messages.append(
+            {
+                "role": "assistant",
+                "kind": "clarify",
+                "question_text": result.question.prompt,
+                "options": list(result.question.options),
+                "source": result.source,
+                "used_llm": result.used_llm,
+                "intent": asdict(result.intent),
+                "trace": [asdict(stage) for stage in result.trace],
+            }
+        )
+        return
 
     messages.append(
         {
             "role": "assistant",
-            "picks": picks,
-            "source": source,
-            "used_llm": used_llm,
+            "kind": "recommend",
+            "picks": result.picks,
+            "source": result.source,
+            "used_llm": result.used_llm,
             "refine": len(user_turns) > 1,
             "pref": user_turns[-1],
+            "intent": asdict(result.intent),
+            "trace": [asdict(stage) for stage in result.trace],
         }
     )
 
@@ -1582,7 +2693,6 @@ st.markdown(
     '<div class="top-links">'
     '<a class="nav-pill" href="#filtering">Filter</a>'
     '<a class="nav-pill" href="#candidates">Candidates</a>'
-    '<a class="nav-pill" href="#quality">Audit</a>'
     '<a class="nav-pill" href="#personalize">Chat</a>'
     '</div>'
     f'<span class="nav-status"><span class="status-dot"></span>{escape(nav_status)}</span>'
@@ -1679,52 +2789,94 @@ st.markdown(
 with st.container(border=True):
     st.markdown('<div class="section-title">Filtering</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-copy">These controls define the candidate pool the chat assistant will re-rank later.</div>',
+        '<div class="section-copy">Filter by author and decade to shape the candidate pool the chat assistant will re-rank. Data source, model, and tuning live under Advanced options.</div>',
         unsafe_allow_html=True,
     )
 
-    source_col, model_col, user_col = st.columns([0.28, 0.28, 0.44])
-    with source_col:
+    # The base view shows only the author + decade filters. They depend on the
+    # loaded catalog (which depends on the data source, an advanced setting), so
+    # we reserve their row here and fill it after the data has loaded below.
+    base_filters = st.container()
+
+    # Everything that used to be a primary control is now collapsed by default.
+    with st.expander("Advanced options", expanded=False):
         source = st.selectbox("Data source", [SOURCE_REAL, SOURCE_SAMPLE])
+        model_choices = (
+            ["ubcf", "ibcf", "baseline", "svd", "popularity"]
+            if HAVE_SURPRISE
+            else ["popularity"]
+        )
+        cf_kind = st.selectbox("Model", model_choices, format_func=model_label)
+        k_neighbors = st.slider("Neighborhood size", 5, 50, DEFAULT_UBCF_K)
+        top_n = st.slider("Candidate count", 5, 30, 10)
+        min_ratings = st.slider("Minimum ratings per book", 0, 200, DEFAULT_MIN_RATINGS)
+        # The reader override needs the loaded ratings, so reserve its slot and
+        # fill it once the catalog is available.
+        reader_slot = st.container()
 
     with st.spinner("Loading catalog..."):
         ratings, books = load_data(source)
 
-    model_choices = (
-        ["ubcf", "ibcf", "baseline", "svd", "popularity"]
-        if HAVE_SURPRISE
-        else ["popularity"]
-    )
-    with model_col:
-        cf_kind = st.selectbox("Model", model_choices, format_func=model_label)
-    with user_col:
-        uid = st.selectbox(
-            "Reader profile",
-            sorted(ratings["user_id"].unique())[:1000],
-            key="rec_user",
+    # UBCF needs a user; default to the most active reader unless overridden.
+    auto_uid = auto_reader(ratings)
+    with reader_slot:
+        reader_choice = st.selectbox(
+            "Reader",
+            ["Auto"] + sorted(ratings["user_id"].unique())[:1000],
+            help="Auto uses the most active reader as the UBCF base. The chat does "
+                 "the real personalization on top of these candidates.",
+            key="reader_override",
         )
+    uid = auto_uid if reader_choice == "Auto" else reader_choice
 
-    k_col, top_col, min_col = st.columns(3)
-    with k_col:
-        k_neighbors = st.slider("Neighborhood size", 5, 50, DEFAULT_K)
-    with top_col:
-        top_n = st.slider("Candidate count", 5, 30, 10)
-    with min_col:
-        min_ratings = st.slider("Minimum ratings per book", 0, 200, DEFAULT_MIN_RATINGS)
+    author_opts = author_options(books)
+    decade_opts = decade_options(books)
+    genre_opts = genre_options(books)
 
-    current_config = (source, cf_kind, k_neighbors, top_n, min_ratings, uid)
+    with base_filters:
+        author_col, decade_col = st.columns(2)
+        with author_col:
+            sel_authors = st.multiselect("Authors", author_opts, key="filt_authors")
+        with decade_col:
+            sel_decades = st.multiselect("Decades", decade_opts, key="filt_decades")
+        # Genre stays hidden until genre data exists (genre_opts is empty today).
+        sel_genres = []
+        if genre_opts:
+            sel_genres = st.multiselect("Genres", genre_opts, key="filt_genres")
+
+    allowed_book_ids = filter_book_ids(books, sel_authors, sel_decades, sel_genres)
+
+    current_config = (
+        source,
+        cf_kind,
+        k_neighbors,
+        top_n,
+        min_ratings,
+        uid,
+        tuple(sorted(sel_authors)),
+        tuple(sorted(sel_decades)),
+        tuple(sorted(sel_genres)),
+    )
     if st.session_state.get("rec_config") != current_config:
         st.session_state["cf_recs"] = None
         st.session_state["chat_messages"] = []
         st.session_state["chat_pending"] = None
 
-    user_history = ratings[ratings["user_id"] == uid]
+    filter_pills = ""
+    if sel_authors:
+        filter_pills += f'<span class="pill">{len(sel_authors)} author(s)</span>'
+    if sel_decades:
+        filter_pills += (
+            f'<span class="pill">{escape(", ".join(sel_decades))}</span>'
+        )
+    if sel_genres:
+        filter_pills += f'<span class="pill">{len(sel_genres)} genre(s)</span>'
     st.markdown(
         f'<div class="pill-row">'
         f'<span class="pill">{escape(model_label(cf_kind))}</span>'
         f'<span class="pill">Top {top_n}</span>'
-        f'<span class="pill">{len(user_history):,} reader ratings</span>'
         f'<span class="pill">Min {min_ratings:,} book ratings</span>'
+        f'{filter_pills}'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -1741,10 +2893,16 @@ with st.container(border=True):
                 top_n=top_n,
                 min_ratings=min_ratings,
                 explain=False,
+                allowed_book_ids=allowed_book_ids,
             )
             st.session_state["rec_config"] = current_config
             st.session_state["chat_messages"] = []
             st.session_state["chat_pending"] = None
+        if allowed_book_ids is not None and st.session_state["cf_recs"].empty:
+            st.warning(
+                "Your filters removed every candidate — relax a filter or lower "
+                "the minimum ratings."
+            )
 
 n_users = ratings["user_id"].nunique()
 n_books = len(books)
@@ -1762,6 +2920,46 @@ with metrics[2]:
     render_metric("Ratings", f"{n_ratings:,}", "observed signals")
 with metrics[3]:
     render_metric("Sparsity", f"{sparsity:.1%}", "matrix empty")
+
+st.markdown('<div id="insights" class="section"></div>', unsafe_allow_html=True)
+with st.expander("Dataset insights — users, books & ratings (EDA)", expanded=False):
+    ins = dataset_insights(ratings, books)
+    chart_l, chart_r = st.columns(2)
+    with chart_l:
+        st.caption("How users rate — rating-value distribution")
+        st.bar_chart(ins["rating_dist"], color="#a35421")
+    with chart_r:
+        st.caption("Catalog by publication decade")
+        st.bar_chart(ins["decade_dist"], color="#7c4a23")
+    st.caption("Most-rated books — the head of the popularity long tail")
+    st.dataframe(ins["top_books"], hide_index=True, width="stretch")
+    st.markdown(
+        f"""
+**What the data shows**
+
+- **Positivity bias.** The mean rating is **{ins['mean_rating']:.2f} / 5** and
+  **{ins['pct_4plus']:.0%}** of all ratings are 4★ or higher — people mostly log
+  books they already liked. This inflates accuracy and makes a mean/popularity
+  benchmark hard to beat.
+- **Popularity is a long tail.** The top 10% most-rated books capture
+  **{ins['top10pct_share']:.0%}** of all ratings, while the median book has only
+  **{ins['per_book_median']}** ratings — a few blockbusters dominate.
+- **Active vs. casual readers.** The median reader has rated
+  **{ins['per_user_median']}** books (mean {ins['per_user_mean']:.0f}, max
+  {ins['per_user_max']:,}) — a classic power-user skew.
+- **Sparsity.** The user × book matrix is **{ins['sparsity']:.1%}** empty — most
+  users haven't rated most books. This is the core challenge for collaborative
+  filtering (cold-start, thin neighborhoods).
+- **Modern-skewed catalog.** Most titles are post-1990; pre-1900 decades are so
+  sparse they're grouped into a single "Before 1900s" filter bin.
+
+**Why it matters for modeling:** strong positivity + popularity concentration
+means a **popularity/mean baseline is a tough benchmark**, and sparsity limits
+neighborhood CF — exactly why we benchmark UBCF/IBCF against the baseline
+(*Advanced · Model quality & audit*) and add an LLM layer for personalization
+*beyond* popularity.
+"""
+    )
 
 st.markdown('<div id="candidates" class="section"></div>', unsafe_allow_html=True)
 st.markdown(
@@ -1783,7 +2981,7 @@ if recs is None:
 else:
     st.markdown(
         f'<div class="section-copy">{escape(model_label(cf_kind))} scored '
-        f'{len(recs):,} books for reader {escape(str(uid))}.</div>',
+        f'{len(recs):,} books matching your filters.</div>',
         unsafe_allow_html=True,
     )
     render_recommendation_cards(recs, books)
@@ -1795,33 +2993,71 @@ else:
         )
 
 st.markdown('<div id="quality" class="section"></div>', unsafe_allow_html=True)
-left, right = st.columns([0.34, 0.66], gap="large")
-with left:
-    with st.container(border=True):
-        st.markdown('<div class="section-title">Quality check</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="section-copy">Optional 90/10 hold-out bake-off with seed {RANDOM_STATE}.</div>',
-            unsafe_allow_html=True,
-        )
-        if st.button("Run model audit", type="primary", width="stretch"):
-            st.session_state["eval_ran"] = True
-with right:
+with st.expander("Advanced · Model quality & audit", expanded=False):
+    st.markdown(
+        "**Offline hold-out from the project notebooks** (fixed test set). "
+        "UBCF (pearson) is the best model."
+    )
+    st.dataframe(
+        pd.DataFrame(
+            NOTEBOOK_METRICS,
+            columns=["model", "P@10", "R@10", "F1@10"],
+        ).set_index("model"),
+        width="stretch",
+    )
+    st.markdown(
+        f"Or run a fresh 90/10 hold-out bake-off in this session (seed {RANDOM_STATE})."
+    )
+    if st.button("Run model audit", type="primary"):
+        st.session_state["eval_ran"] = True
     if st.session_state.get("eval_ran"):
         results, n_train, n_test = run_model_bakeoff(source, k_neighbors)
         st.markdown(
-            f'<div class="section-copy">Train: {n_train:,} ratings. Test: {n_test:,} ratings.</div>',
+            f'<div class="section-copy">Live bake-off — train: {n_train:,} ratings, '
+            f'test: {n_test:,} ratings.</div>',
             unsafe_allow_html=True,
         )
         st.dataframe(results, width="stretch")
-    else:
-        with st.container(border=True):
-            st.markdown(
-                '<div class="empty-state"><div>'
-                '<div class="empty-title">Audit not run</div>'
-                '<div>Keep scrolling, or run the bake-off when you need model evidence.</div>'
-                '</div></div>',
-                unsafe_allow_html=True,
-            )
+
+st.markdown('<div id="business" class="section"></div>', unsafe_allow_html=True)
+with st.expander("Business applications & recommended approach", expanded=False):
+    st.markdown(
+        """
+**Collaborative filtering (UBCF / IBCF).** Powers the "readers like you also
+enjoyed…" experience — catalog discovery, engagement, retention, and cross-sell.
+It's cheap to serve once trained and needs no content metadata, just the
+behavior signal the business already collects.
+
+**LLM re-ranking layer.** Turns a static Top-N into *natural-language,
+mood-aware* personalization with a short, explainable reason per pick ("why this
+book"). That drives conversational commerce, merchandising, and trust — it
+captures intent ("a cozy mystery, nothing gory") that ratings alone can't
+express, and it differentiates the UX.
+
+**Challenges a business would face**
+
+- *Collaborative filtering:* cold-start for new users/books, data **sparsity**,
+  popularity bias (the long tail above), scaling similarity to millions of
+  users, deciding retrain cadence, and the gap between offline metrics and real
+  online lift.
+- *LLM layer:* API **cost & latency** at scale, **grounding** (the model must
+  re-rank only real candidates, never invent books), prompt-injection/safety,
+  vendor lock-in and **API-key management**, reproducibility, and measuring
+  incremental value over plain CF.
+
+**Recommended approach for this dataset.** The EDA shows a strong popularity
+baseline and high sparsity, so: use **UBCF (pearson)** — the best CF model in our
+audit — to generate candidates, but keep the popularity/mean baseline as a
+guardrail and cold-start fallback. Layer the **LLM re-ranker** strictly on top of
+those CF candidates for personalization + explanations, cache/limit LLM calls to
+control cost, and graduate from offline Precision/Recall@K to **A/B-tested online
+lift** once live.
+
+*Model used for the AI layer: Google Gemini (`gemini-2.0-flash`). The API key is
+read from the environment and never committed; without it the app falls back to a
+transparent heuristic re-ranker so it always runs.*
+"""
+    )
 
 st.markdown('<div id="personalize" class="section"></div>', unsafe_allow_html=True)
 with st.container(key="chat_stage"):
@@ -1834,9 +3070,20 @@ with st.container(key="chat_stage"):
     pending = bool(st.session_state.get("chat_pending"))
     has_recs = st.session_state.get("cf_recs") is not None
     refining = bool(messages)
+    # The DAG paused to ask a question if the last turn is a clarify message and
+    # we're not mid-run; the composer then shows the question's quick-reply chips.
+    last_message = messages[-1] if messages else None
+    awaiting_clarify = (
+        not pending
+        and last_message is not None
+        and last_message.get("role") == "assistant"
+        and last_message.get("kind") == "clarify"
+    )
 
     if refining:
-        render_chat_thread(messages, pending=pending)
+        render_chat_thread(
+            messages, pending=pending, book_meta=book_media_lookup(books)
+        )
     else:
         st.markdown(
             '<div class="chat-hero">'
@@ -1872,25 +3119,18 @@ with st.container(key="chat_stage"):
             height=92,
         )
         control_cols = st.columns(
-            [0.08, 0.55, 0.19, 0.18],
+            [0.64, 0.18, 0.18],
             gap="small",
             vertical_alignment="center",
         )
-        with control_cols[0]:
-            st.button(
-                "+",
-                disabled=True,
-                width="stretch",
-                help="Attachments coming soon",
-            )
-        with control_cols[2]:
+        with control_cols[1]:
             chat_mode = st.selectbox(
                 "Depth",
                 ["Focused", "Extended"],
                 label_visibility="collapsed",
                 help="Focused returns 5 picks; Extended returns 8.",
             )
-        with control_cols[3]:
+        with control_cols[2]:
             send = st.button(
                 "Send",
                 type="primary",
@@ -1904,7 +3144,38 @@ with st.container(key="chat_stage"):
         submit_chat_message(chat_pref.strip(), personalized_k)
         st.rerun()
 
-    if refining:
+    if awaiting_clarify:
+        clarify_options = [
+            o for o in (last_message.get("options") or []) if str(o).strip()
+        ]
+        with st.container(key="chat_suggestions"):
+            if clarify_options:
+                chip_cols = st.columns(len(clarify_options), gap="small")
+                for col, option in zip(chip_cols, clarify_options):
+                    with col:
+                        if st.button(
+                            option, disabled=composer_disabled, width="stretch"
+                        ):
+                            submit_chat_message(option, personalized_k)
+                            st.rerun()
+        skip_cols = st.columns([0.5, 0.22, 0.28])
+        with skip_cols[2]:
+            if st.button(
+                "Just recommend something →",
+                disabled=composer_disabled,
+                width="stretch",
+            ):
+                submit_chat_message(
+                    "Just recommend something", personalized_k, skip_clarify=True
+                )
+                st.rerun()
+        with skip_cols[0]:
+            if st.button("↻ Start a new chat", width="stretch", disabled=pending):
+                st.session_state["chat_messages"] = []
+                st.session_state["chat_pending"] = None
+                st.session_state["clear_chat_input"] = True
+                st.rerun()
+    elif refining:
         refine_chips = [
             "Make them darker and moodier",
             "Lean more recent",

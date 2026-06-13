@@ -19,13 +19,20 @@ def popular_books(ratings: pd.DataFrame, min_ratings: int = 20) -> set:
 
 def recommend_top_n(user_id, hybrid, ratings: pd.DataFrame, books: pd.DataFrame,
                     top_n: int = 10, min_ratings: int = 20,
-                    explain: bool = True) -> pd.DataFrame:
-    """Return a DataFrame of the user's top-N recommended books."""
+                    explain: bool = True, allowed_book_ids=None) -> pd.DataFrame:
+    """Return a DataFrame of the user's top-N recommended books.
+
+    allowed_book_ids: optional set of book_ids to restrict candidates to (e.g. an
+    author/decade/genre filter). When None (default) no restriction is applied and
+    behavior is identical to before. When an empty set, no candidates remain.
+    """
     seen = set(ratings.loc[ratings["user_id"] == user_id, "book_id"])
     pop = popular_books(ratings, min_ratings)
     candidates = [b for b in books["book_id"] if b not in seen and b in pop]
     if not candidates:                          # tiny catalog / cold start fallback
         candidates = [b for b in books["book_id"] if b not in seen]
+    if allowed_book_ids is not None:            # user filter: never re-widened below
+        candidates = [b for b in candidates if b in allowed_book_ids]
 
     user_ratings = ratings[ratings["user_id"] == user_id]
     scores = hybrid.score(user_id, user_ratings, candidates)
