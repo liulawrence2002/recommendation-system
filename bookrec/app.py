@@ -26,6 +26,18 @@ from dotenv import load_dotenv
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_APP_DIR, ".env"))
 
+# On Streamlit Community Cloud the API key is supplied via the app's Secrets
+# (Settings -> Secrets, TOML: GEMINI_API_KEY="..."). Mirror it into the
+# environment so the existing os.environ-based re-ranker picks it up; locally the
+# .env above still works and this is a harmless no-op.
+if not os.environ.get("GEMINI_API_KEY"):
+    try:
+        _secret_key = st.secrets.get("GEMINI_API_KEY")
+        if _secret_key:
+            os.environ["GEMINI_API_KEY"] = str(_secret_key)
+    except Exception:
+        pass
+
 sys.path.insert(0, _APP_DIR)
 
 from src import data_loader, evaluate, llm_rerank, rag_pipeline, recommend  # noqa: E402
@@ -2367,7 +2379,10 @@ def render_chat_thread(messages, pending: bool = False, book_meta=None) -> None:
 def load_data(source: str):
     if source == SOURCE_SAMPLE:
         return data_loader.load_sample()
-    return data_loader.load("data")
+    # Absolute path so the app works regardless of the working directory — on
+    # hosted platforms (e.g. Streamlit Community Cloud) the CWD is the repo root,
+    # not this folder, so a bare "data" would not resolve.
+    return data_loader.load(os.path.join(_APP_DIR, "data"))
 
 
 def auto_reader(ratings):

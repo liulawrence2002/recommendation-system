@@ -1,0 +1,15 @@
+# Dependencies for the BookRec Streamlit app (main file: bookrec/app.py).
+# Streamlit Community Cloud installs from this root-level file.
+#
+# NOTE: pick Python 3.12 in the Streamlit Cloud "Advanced settings" — scikit-surprise
+# needs to compile and is most reliable on 3.11/3.12 with NumPy 1.x.
+
+numpy<2.0              # scikit-surprise is compiled against NumPy 1.x
+pandas
+scikit-learn
+streamlit
+
+scikit-surprise       # user/item collaborative filtering (the CF models)
+
+google-generativeai   # LLM re-ranking layer (Gemini)
+python-dotenv         # local .env loading
