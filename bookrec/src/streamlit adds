@@ -1,3 +1,68 @@
+# near line 1643
+# Because your file is a .png, first update asset_data_uri() so it does not always label images as WebP.
+# Replace this line inside asset_data_uri():
+mime = "image/png" if filename.lower().endswith(".png") else "image/webp"
+return f"data:{mime};base64,{_encode_asset(path, os.path.getmtime(path))}"
+
+#after the webp add
+coffee_uri = asset_data_uri("coffee-backdrop.png")
+
+#around line 1648
+if coffee_uri:
+    coffee_floats = "\n".join(
+        f'<img class="coffee-float coffee-float-{i}" src="{coffee_uri}" alt="">'
+        for i in range(1, 13)
+    )
+
+    st.markdown(
+        f'<div class="coffee-float-layer" aria-hidden="true">{coffee_floats}</div>',
+        unsafe_allow_html=True,
+    )
+#inside your big CSS block in inject_css(), add:
+.coffee-float-layer {
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
+    position: fixed;
+    z-index: 0;
+}
+
+.coffee-float {
+    animation: coffee-drift 18s ease-in-out infinite alternate;
+    border-radius: 999px;
+    filter: drop-shadow(0 14px 24px rgba(42, 33, 24, 0.22));
+    height: 72px;
+    object-fit: cover;
+    opacity: 0.28;
+    position: absolute;
+    width: 72px;
+}
+
+.coffee-float-1 { left: 4%; top: 12%; animation-delay: -1s; }
+.coffee-float-2 { left: 18%; top: 32%; animation-delay: -7s; }
+.coffee-float-3 { left: 35%; top: 10%; animation-delay: -4s; }
+.coffee-float-4 { left: 52%; top: 24%; animation-delay: -10s; }
+.coffee-float-5 { left: 72%; top: 14%; animation-delay: -2s; }
+.coffee-float-6 { left: 88%; top: 38%; animation-delay: -6s; }
+.coffee-float-7 { left: 8%; top: 70%; animation-delay: -9s; }
+.coffee-float-8 { left: 26%; top: 82%; animation-delay: -3s; }
+.coffee-float-9 { left: 46%; top: 66%; animation-delay: -12s; }
+.coffee-float-10 { left: 63%; top: 78%; animation-delay: -5s; }
+.coffee-float-11 { left: 80%; top: 64%; animation-delay: -8s; }
+.coffee-float-12 { left: 94%; top: 82%; animation-delay: -11s; }
+
+@keyframes coffee-drift {
+    0% {
+        transform: translate3d(-10px, 8px, 0) rotate(-6deg) scale(0.9);
+    }
+    50% {
+        transform: translate3d(12px, -18px, 0) rotate(5deg) scale(1.04);
+    }
+    100% {
+        transform: translate3d(-4px, -34px, 0) rotate(-3deg) scale(0.96);
+    }
+}
+
 # after line 1765 in app.py
 # --- Exploratory Data Analysis ---
 import pandas as pd
