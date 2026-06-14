@@ -59,6 +59,18 @@ ipython_config.py
 Thumbs.db
 desktop.ini
 
+# Node / Next.js (vercel_frontend)
+node_modules/
+.next/
+out/
+.vercel/
+next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
 # Logs and local artifacts
 *.log
 .cache/

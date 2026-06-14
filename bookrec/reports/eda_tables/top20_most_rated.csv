@@ -1,0 +1,21 @@
+book_id,observed_ratings,observed_avg,observed_std,title,authors,original_publication_year,language_code,average_rating,ratings_count,shrunk_avg
+62,100,3.8,1.1720654306553766,"The Golden Compass (His Dark Materials, #1)",Philip Pullman,1995.0,eng,3.94,994914,3.8029996024872426
+26,100,3.44,1.0378688342809594,"The Da Vinci Code (Robert Langdon, #2)",Dan Brown,2003.0,eng,3.79,1557292,3.4696662691539095
+1,100,4.24,0.8889898932513408,"The Hunger Games (The Hunger Games, #1)",Suzanne Collins,2008.0,eng,4.34,4942365,4.21040700989465
+2,100,4.21,1.0376254944182253,"Harry Potter and the Sorcerer's Stone (Harry Potter, #1)","J.K. Rowling, Mary GrandPré",1997.0,eng,4.44,4800065,4.182629232116873
+32,100,3.95,0.9360890055238478,Of Mice and Men,John Steinbeck,1937.0,eng,3.84,1518741,3.9418884913761314
+45,100,3.91,1.0258773037864921,Life of Pi,Yann Martel,2001.0,,3.88,1077431,3.9048514543390946
+46,100,3.9,0.9692233691951198,Water for Elephants,Sara Gruen,2006.0,eng,4.07,1108839,3.895592195079835
+17,100,3.97,0.9476712552783312,"Catching Fire (The Hunger Games, #2)",Suzanne Collins,2009.0,eng,4.3,1988079,3.96040700989465
+18,100,4.16,0.9180567971690439,"Harry Potter and the Prisoner of Azkaban (Harry Potter, #3)","J.K. Rowling, Mary GrandPré, Rufus Beck",1999.0,eng,4.53,1969375,4.136332935820576
+19,100,4.14,1.137248140615465,"The Fellowship of the Ring (The Lord of the Rings, #1)",J.R.R. Tolkien,1954.0,eng,4.34,1832541,4.117814417302057
+20,100,3.71,1.0758600036597454,"Mockingjay (The Hunger Games, #3)",Suzanne Collins,2010.0,eng,4.03,1870748,3.7196662691539095
+21,100,4.16,0.8729376850727673,"Harry Potter and the Order of the Phoenix (Harry Potter, #5)","J.K. Rowling, Mary GrandPré",2003.0,eng,4.46,1840548,4.136332935820576
+22,100,3.73,0.9832434473555757,The Lovely Bones,Alice Sebold,2002.0,eng,3.77,1661562,3.7381847876724277
+23,100,3.96,0.9735906675183302,"Harry Potter and the Chamber of Secrets (Harry Potter, #2)","J.K. Rowling, Mary GrandPré",1998.0,eng,4.37,1906199,3.951147750635391
+24,100,4.21,0.8077278269468267,"Harry Potter and the Goblet of Fire (Harry Potter, #4)","J.K. Rowling, Mary GrandPré",2000.0,eng,4.53,1868642,4.182629232116873
+60,100,3.82,0.8572919543244849,The Curious Incident of the Dog in the Night-Time,Mark Haddon,2003.0,eng,3.85,915790,3.821518121005761
+289,100,3.94,1.071391052734149,"Watership Down (Watership Down, #1)",Richard Adams,1972.0,eng,4.05,308373,3.9326292321168723
+79,100,3.91,1.0059921480907303,The Odyssey,"Homer, Robert Fagles, E.V. Rieu, Frédéric Mugler, Bernard Knox",-720.0,eng,3.73,710757,3.9048514543390946
+50,100,4.26,0.9600084174715147,Where the Sidewalk Ends,Shel Silverstein,1974.0,eng,4.29,1023781,4.228925528413169
+54,100,3.99,1.0777361233229366,"The Hitchhiker's Guide to the Galaxy (Hitchhiker's Guide to the Galaxy, #1)",Douglas Adams,1979.0,en-US,4.2,1006479,3.9789255284131686

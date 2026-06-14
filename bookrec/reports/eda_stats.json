@@ -1,0 +1,104 @@
+{
+  "overview": {
+    "n_ratings": 164728,
+    "n_users": 1192,
+    "n_books_rated": 9229,
+    "n_catalog": 9964,
+    "n_books_never_rated": 735,
+    "matrix_cells": 11000968,
+    "density_pct": 1.4974,
+    "sparsity_pct": 98.5026,
+    "global_mean_rating": 3.8405,
+    "median_rating": 4.0,
+    "pct_4_or_5_star": 65.02,
+    "avg_ratings_per_user": 138.19,
+    "avg_ratings_per_book": 17.85
+  },
+  "data_quality": {
+    "Duplicate book IDs": 0,
+    "Duplicate user-book ratings": 0,
+    "Ratings with no matching book": 0,
+    "Missing book titles": 0,
+    "Missing user IDs": 0,
+    "Missing book IDs in ratings": 0,
+    "Missing ratings": 0,
+    "Ratings outside 1-5": 0
+  },
+  "cold_start_users": {
+    "users_with_lt_1": 0,
+    "users_with_lt_5": 0,
+    "users_with_lt_10": 0,
+    "users_with_lt_20": 0,
+    "pct_lt_5": 0.0
+  },
+  "cold_start_books": {
+    "books_with_lt_5": 2813,
+    "books_with_lt_10": 4979,
+    "books_with_lt_20": 6799,
+    "books_with_lt_50": 8307
+  },
+  "single_value_users": 19,
+  "sample_design": {
+    "min_ratings_per_user": 100,
+    "max_ratings_per_user": 200,
+    "median_ratings_per_user": 129.0,
+    "max_ratings_per_book": 100,
+    "pct_books_lt_5": 30.5,
+    "pct_books_lt_10": 53.9,
+    "note": "Every reader has 100+ ratings (min observed = 100); this is a filtered dense-user core, so user-side cold-start is absent by construction and the cold-start risk sits on the item side."
+  },
+  "concentration": {
+    "gini_book_popularity": 0.5953,
+    "gini_user_activity": 0.1253,
+    "top_n_books_share_pct": {
+      "10": 0.61,
+      "50": 3.04,
+      "100": 6.07,
+      "500": 28.1,
+      "1000": 46.07
+    },
+    "top_pct_books_share_pct": {
+      "top_1pct_books": 5.58,
+      "top_5pct_books": 26.28,
+      "top_10pct_books": 43.81
+    },
+    "zipf_slope": -1.101,
+    "zipf_loglog_r2": 0.803
+  },
+  "bias_decomposition": {
+    "lambda": 10.0,
+    "global_mean": 3.8405,
+    "r2_user_bias": 0.2686,
+    "r2_user_plus_item_bias": 0.3435,
+    "rmse_global_mean": 1.0083,
+    "rmse_user_bias": 0.8623,
+    "rmse_user_item_bias": 0.817,
+    "std_user_bias": 0.4889,
+    "std_item_bias": 0.1684,
+    "note": "In-sample / illustrative; not a held-out evaluation."
+  },
+  "shrinkage": {
+    "prior_strength_C": 8.0,
+    "top10_overlap_raw_vs_shrunk": 0,
+    "max_abs_shift": 2.525
+  },
+  "calibration_observed_vs_goodreads_pearson_r": 0.483,
+  "engagement_segmentation_pct_of_ratings": {
+    "Top 1%": 1.44,
+    "Top 5%": 7.05,
+    "Top 10%": 13.93,
+    "Top 25%": 33.38,
+    "Top 50%": 59.37
+  },
+  "metadata_missing_pct": {
+    "language_code": 10.8,
+    "isbn": 7.01,
+    "original_publication_year": 0.0,
+    "authors": 0.0
+  },
+  "vintage": {
+    "median_year": 2004.0,
+    "pct_since_2000": 62.26,
+    "anomalies_year_lt0_or_gt2026": 31
+  }
+}

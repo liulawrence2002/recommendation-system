@@ -1,0 +1,9 @@
+check,count
+Duplicate book IDs,0
+Duplicate user-book ratings,0
+Ratings with no matching book,0
+Missing book titles,0
+Missing user IDs,0
+Missing book IDs in ratings,0
+Missing ratings,0
+Ratings outside 1-5,0
