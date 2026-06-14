@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type ReactNode,
-  type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
 import { useReducedMotion } from "framer-motion";
