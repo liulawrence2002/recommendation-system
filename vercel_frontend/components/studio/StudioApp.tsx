@@ -1,20 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { ChatMessage, ModelKind, PipelineResult, Rec } from "@/lib/types";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type {
+  ChatMessage,
+  ModelKind,
+  PipelineResult,
+  Rec,
+  RecommendMessage,
+  ShelfItem,
+} from "@/lib/types";
 import { loadDataset, type Dataset as DatasetType } from "@/lib/clientData";
 import {
   candidatesFromRecs,
   filterBookIds,
   recommendTopN,
+  MODEL_LABELS,
 } from "@/lib/recommend";
 import FilterPanel from "./FilterPanel";
-import Metrics from "./Metrics";
-import Eda from "./Eda";
-import CandidateList from "./CandidateList";
-import Audit from "./Audit";
-import Business from "./Business";
+import Shelf from "./Shelf";
 import Chat from "./Chat";
+import IntroGate from "./IntroGate";
 
 export default function StudioApp() {
   const [data, setData] = useState<DatasetType | null>(null);
@@ -150,6 +155,7 @@ export default function StudioApp() {
             pref: userTurns[0] ?? text,
             intent: result.intent,
             trace: result.trace,
+            scored: result.scored, // for the shelf "% match" badge (UI-only)
           },
         ]);
       }
@@ -168,8 +174,65 @@ export default function StudioApp() {
     setChatError(null);
   }
 
+  // The shelf shows the re-ranked picks (with a % match from the pipeline's
+  // per-book relevance) once a recommend turn exists, otherwise the raw CF list.
+  const lastRecommend = useMemo<RecommendMessage | null>(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === "assistant" && m.kind === "recommend") return m;
+    }
+    return null;
+  }, [messages]);
+
+  const shelfItems = useMemo<ShelfItem[] | null>(() => {
+    if (!data || recs === null) return null;
+    const bookById = data.bookById;
+    if (lastRecommend) {
+      const relById = new Map(
+        (lastRecommend.scored ?? []).map((s) => [s.book_id, s.relevance])
+      );
+      return lastRecommend.picks.map((p, i) => {
+        const rel = relById.get(p.book_id);
+        return {
+          book: bookById.get(p.book_id),
+          book_id: p.book_id,
+          title: p.title,
+          authors: p.authors,
+          rank: i + 1,
+          match: rel != null ? Math.round(100 * rel) : null,
+          why: p.explanation || null,
+          synopsis: p.description || null,
+          cfScore: null,
+        };
+      });
+    }
+    return recs.map((r, i) => ({
+      book: bookById.get(r.book_id),
+      book_id: r.book_id,
+      title: r.title,
+      authors: r.authors,
+      rank: i + 1,
+      match: null,
+      why: null,
+      synopsis: null,
+      cfScore: r.score,
+    }));
+  }, [data, recs, lastRecommend]);
+
+  function scrollToChat() {
+    const el = document.getElementById("chat");
+    if (el) {
+      const y = el.getBoundingClientRect().top + window.scrollY - 70;
+      window.scrollTo({ top: y, behavior: "smooth" });
+    }
+    setTimeout(() => {
+      document.querySelector<HTMLTextAreaElement>("#chat textarea")?.focus();
+    }, 420);
+  }
+
+  let inner: ReactNode;
   if (loadError) {
-    return (
+    inner = (
       <div className="container" style={{ paddingTop: "8rem" }}>
         <div className="empty-state">
           <div>
@@ -182,54 +245,56 @@ export default function StudioApp() {
         </div>
       </div>
     );
-  }
-
-  if (!data) {
-    return (
+  } else if (!data) {
+    inner = (
       <div className="studio-loading">
         <div className="spinner" />
         <div>Loading the catalog &amp; pre-computed model scores…</div>
       </div>
     );
+  } else {
+    inner = (
+      <div className="container stack" style={{ paddingTop: "1rem" }}>
+        <FilterPanel
+          authorOptions={data.stats.filters.authors}
+          decadeOptions={data.stats.filters.decades}
+          selectedAuthors={authors}
+          selectedDecades={decades}
+          model={model}
+          minRatings={minRatings}
+          candidateCount={candidateCount}
+          autoUser={data.scores.autoUser}
+          autoUserRatings={data.scores.autoUserRatings}
+          onAuthors={setAuthors}
+          onDecades={setDecades}
+          onModel={setModel}
+          onMinRatings={setMinRatings}
+          onCandidateCount={setCandidateCount}
+          onGenerate={generate}
+        />
+
+        <Shelf
+          items={shelfItems}
+          modelLabel={MODEL_LABELS[model]}
+          reranked={lastRecommend !== null}
+          pending={pending}
+          onRefine={scrollToChat}
+        />
+
+        {chatError && <div className="chat-lock">{chatError}</div>}
+        <Chat
+          messages={messages}
+          pending={pending}
+          hasRecs={recs !== null}
+          bookById={data.bookById}
+          depth={depth}
+          onDepth={setDepth}
+          onSubmit={submit}
+          onReset={resetChat}
+        />
+      </div>
+    );
   }
 
-  return (
-    <div className="container stack" style={{ paddingTop: "1rem" }}>
-      <FilterPanel
-        authorOptions={data.stats.filters.authors}
-        decadeOptions={data.stats.filters.decades}
-        selectedAuthors={authors}
-        selectedDecades={decades}
-        model={model}
-        minRatings={minRatings}
-        candidateCount={candidateCount}
-        autoUser={data.scores.autoUser}
-        autoUserRatings={data.scores.autoUserRatings}
-        onAuthors={setAuthors}
-        onDecades={setDecades}
-        onModel={setModel}
-        onMinRatings={setMinRatings}
-        onCandidateCount={setCandidateCount}
-        onGenerate={generate}
-      />
-
-      <Metrics headline={data.stats.headline} />
-      <Eda eda={data.stats.eda} />
-      <CandidateList recs={recs} bookById={data.bookById} model={model} />
-      <Audit audit={data.stats.audit} />
-      <Business />
-
-      {chatError && <div className="chat-lock">{chatError}</div>}
-      <Chat
-        messages={messages}
-        pending={pending}
-        hasRecs={recs !== null}
-        bookById={data.bookById}
-        depth={depth}
-        onDepth={setDepth}
-        onSubmit={submit}
-        onReset={resetChat}
-      />
-    </div>
-  );
+  return <IntroGate>{inner}</IntroGate>;
 }

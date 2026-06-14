@@ -10,8 +10,8 @@ const LANDING_LINKS: NavLink[] = [
 
 const STUDIO_LINKS: NavLink[] = [
   { label: "Filter", href: "#filter" },
-  { label: "Candidates", href: "#candidates" },
-  { label: "Chat", href: "#chat" },
+  { label: "The shelf", href: "#shelf" },
+  { label: "Refine", href: "#chat" },
 ];
 
 export default function Nav({

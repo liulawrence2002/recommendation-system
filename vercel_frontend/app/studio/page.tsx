@@ -13,17 +13,7 @@ export default function StudioPage() {
         variant="studio"
         status={{ label: hasKey ? "Gemini ready" : "Heuristic mode", idle: !hasKey }}
       />
-      <main className="page">
-        <header className="studio-hero">
-          <div className="container">
-            <div className="eyebrow">BookRec studio</div>
-            <h1 className="hero-title">Build the shortlist, then talk it into shape.</h1>
-            <p className="hero-copy">
-              Generate collaborative-filtering candidates, then refine them in a conversation that
-              reads your intent, asks when it&apos;s unsure, and explains every pick.
-            </p>
-          </div>
-        </header>
+      <main className="page" id="top" style={{ paddingTop: "calc(var(--nav-h) + 2.5rem)" }}>
         <StudioApp />
       </main>
       <Footer />
