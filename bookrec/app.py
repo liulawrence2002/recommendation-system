@@ -1895,6 +1895,90 @@ def safe_text(value, fallback: str = "") -> str:
     return text or fallback
 
 
+def format_year(value) -> str:
+    try:
+        year = int(float(value))
+    except (TypeError, ValueError):
+        return "Year unknown"
+    return str(year) if year > 0 else "Year unknown"
+
+
+def format_number(value) -> str:
+    try:
+        return f"{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def format_score(value) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "0.000"
+
+
+def render_recommendation_cards(recs, books) -> None:
+    meta_cols = [
+        "book_id",
+        "original_publication_year",
+        "average_rating",
+        "ratings_count",
+    ]
+    # Pull the cover-image link straight from the catalog when present (the
+    # assignment dataset ships Goodreads `small_image_url`/`image_url`; the
+    # synthetic sample has neither, so we fall back to a placeholder tile).
+    for col in ("small_image_url", "image_url"):
+        if col in books.columns and col not in meta_cols:
+            meta_cols.append(col)
+    display = recs.merge(books[meta_cols], on="book_id", how="left")
+
+    cards = ['<div class="rec-list">']
+    for rank, row in enumerate(display.itertuples(index=False), start=1):
+        title_raw = safe_text(getattr(row, "title", None), "Untitled")
+        authors_raw = safe_text(getattr(row, "authors", None), "Unknown author")
+        title = escape(title_raw)
+        authors = escape(authors_raw)
+        year = escape(format_year(getattr(row, "original_publication_year", None)))
+        avg = format_score(getattr(row, "average_rating", None))
+        rating_count = escape(format_number(getattr(row, "ratings_count", None)))
+        score = escape(format_score(getattr(row, "score", None)))
+        cover = safe_text(getattr(row, "small_image_url", None)) or safe_text(
+            getattr(row, "image_url", None)
+        )
+        # Same cover + Goodreads link treatment as the chat pick cards.
+        link = escape(_goodreads_url(cover, title_raw, authors_raw))
+        if cover.startswith("http"):
+            cover_inner = (
+                f'<img class="rec-cover" src="{escape(cover)}" alt="" '
+                f'loading="lazy" referrerpolicy="no-referrer">'
+            )
+        else:
+            cover_inner = (
+                '<span class="rec-cover rec-cover--empty" aria-hidden="true">📖</span>'
+            )
+        cards.append(
+            f'<article class="rec-card">'
+            f'<div class="rank">{rank}</div>'
+            f'<a class="rec-cover-link" href="{link}" target="_blank" '
+            f'rel="noopener noreferrer">{cover_inner}</a>'
+            f'<div>'
+            f'<div class="rec-title">'
+            f'<a class="rec-title-link" href="{link}" target="_blank" '
+            f'rel="noopener noreferrer">{title}</a></div>'
+            f'<div class="rec-author">{authors}</div>'
+            f'<div class="rec-meta">'
+            f'<span>{year}</span>'
+            f'<span>Avg {avg}</span>'
+            f'<span>{rating_count} ratings</span>'
+            f'</div>'
+            f'</div>'
+            f'<div class="rec-score">Score {score}</div>'
+            f'</article>'
+        )
+    cards.append("</div>")
+    st.markdown("\n".join(cards), unsafe_allow_html=True)
+
+
 def render_intent_chips(intent) -> str:
     """A row of pills summarizing the DAG's extracted intent (Stage A).
 
@@ -2582,6 +2666,7 @@ st.markdown(
     '</a>'
     '<div class="top-links">'
     '<a class="nav-pill" href="#filtering">Filter</a>'
+    '<a class="nav-pill" href="#candidates">Candidates</a>'
     '<a class="nav-pill" href="#personalize">Chat</a>'
     '</div>'
     f'<span class="nav-status"><span class="status-dot"></span>{escape(nav_status)}</span>'
@@ -2788,6 +2873,37 @@ with st.container(border=True):
                 "Your filters removed every candidate — relax a filter or lower "
                 "the minimum ratings."
             )
+
+st.markdown('<div id="candidates" class="section"></div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-title">Candidate list</div>'
+    '<div class="section-copy">This is the model-produced shortlist. The chat section below reorders these books without inventing new titles.</div>',
+    unsafe_allow_html=True,
+)
+
+recs = st.session_state.get("cf_recs")
+if recs is None:
+    with st.container(border=True):
+        st.markdown(
+            '<div class="empty-state"><div>'
+            '<div class="empty-title">No candidates yet</div>'
+            '<div>Use the filters above to generate a ranked list.</div>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+else:
+    st.markdown(
+        f'<div class="section-copy">{escape(model_label(cf_kind))} scored '
+        f'{len(recs):,} books matching your filters.</div>',
+        unsafe_allow_html=True,
+    )
+    render_recommendation_cards(recs, books)
+    with st.expander("Open as table"):
+        st.dataframe(
+            recs[["book_id", "title", "authors", "score"]],
+            width="stretch",
+            hide_index=True,
+        )
 
 st.markdown('<div id="personalize" class="section"></div>', unsafe_allow_html=True)
 with st.container(key="chat_stage"):
