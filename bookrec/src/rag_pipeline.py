@@ -25,10 +25,12 @@ Design rules carried over from ``llm_rerank``:
     feed a heuristic Stage B and vice versa, because stages exchange structured
     objects rather than raw model text.
 
-This module reuses helpers from ``llm_rerank`` (``_call_gemini``, ``_have_gemini``,
-``_candidate_table``, ``_parse_json_list``, ``RerankedPick``, ``DEFAULT_MODEL``) and
-adds no new public surface there. ``llm_rerank.rerank`` is left intact for the
-notebook.
+Each LLM stage uses ``llm_rerank._structured`` — Week-4 structured output
+(Gemini ``response_schema``) — so the model returns typed JSON instead of free
+text we have to regex-parse. This module reuses helpers from ``llm_rerank``
+(``_structured``, ``_have_gemini``, ``_candidate_table``, ``RerankedPick``,
+``DEFAULT_MODEL``) and adds no new public surface there. ``llm_rerank.rerank``
+is left intact for the notebook.
 """
 from __future__ import annotations
 
@@ -39,6 +41,50 @@ from dataclasses import dataclass, field
 
 from . import llm_rerank
 from .llm_rerank import DEFAULT_MODEL, RerankedPick
+
+# --- Week-4 structured-output schemas for each DAG stage -----------------------
+# Each LLM stage forces Gemini to return JSON matching one of these schemas
+# (response.parsed is typed), instead of parsing free text. `pace` and `recency`
+# use Enum fields — the Week-4 "enum mode" technique applied to constrained
+# facets, so the model can only emit a value the downstream scorer understands.
+if llm_rerank._HAVE_PYDANTIC:
+    from enum import Enum
+
+    from pydantic import BaseModel, Field
+
+    class _Pace(str, Enum):
+        FAST = "fast"
+        SLOW = "slow"
+        ANY = "any"
+
+    class _Recency(str, Enum):
+        RECENT = "recent"
+        CLASSIC = "classic"
+        ANY = "any"
+
+    class IntentSchema(BaseModel):
+        mood: str = Field(description="One-word mood, or empty string if unclear.")
+        genres: list[str] = Field(description="Genres the reader wants.")
+        themes: list[str] = Field(description="Topics/themes the reader wants.")
+        pace: _Pace = Field(description="Desired pacing.")
+        avoid: list[str] = Field(description="Things to steer away from.")
+        recency: _Recency = Field(description="Preferred era.")
+        summary: str = Field(description="One sentence restating the whole request.")
+
+    class ScoreItem(BaseModel):
+        book_id: int = Field(description="A book_id taken ONLY from the candidate list.")
+        relevance: float = Field(description="Match score in [0,1].")
+        reason: str = Field(description="One clause tying the book to the intent.")
+        flags: list[str] = Field(description='intent.avoid hits, e.g. "avoid:romance".')
+
+    class ClarifySchema(BaseModel):
+        question: str = Field(description="One short, friendly clarifying question.")
+        options: list[str] = Field(description="3-4 concise tap-to-answer options.")
+
+    SCORE_LIST_SCHEMA = list[ScoreItem]
+else:  # no pydantic -> stages fall back to the legacy text + regex path
+    IntentSchema = ScoreItem = ClarifySchema = None
+    SCORE_LIST_SCHEMA = None
 
 # --- small keyword maps for the offline fallbacks (clearly NOT an LLM) ---------
 
@@ -143,18 +189,6 @@ class PipelineResult:
 
 
 # --- shared helpers ------------------------------------------------------------
-
-def _parse_json_object(text: str):
-    """Pull the first JSON object out of a model reply (mirror of
-    ``llm_rerank._parse_json_list`` but for a single ``{...}``)."""
-    m = re.search(r"\{.*\}", text, re.S)
-    if not m:
-        return {}
-    try:
-        return json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return {}
-
 
 def _describe_book(c) -> str:
     """Synthesize a neutral one-sentence description of a candidate book from its
@@ -296,8 +330,7 @@ def extract_intent(user_turns, *, model: str = DEFAULT_MODEL,
         return _intent_fallback(turns), False
 
     try:
-        raw = llm_rerank._call_gemini(_intent_prompt(turns), model)
-        data = _parse_json_object(raw)
+        data = llm_rerank._structured(_intent_prompt(turns), IntentSchema, model)
     except Exception:
         return _intent_fallback(turns), False
 
@@ -417,8 +450,7 @@ def build_clarifying_question(intent: Intent, *, model: str = DEFAULT_MODEL,
         return _clarify_fallback(intent), False
 
     try:
-        raw = llm_rerank._call_gemini(_clarify_prompt(intent), model)
-        data = _parse_json_object(raw)
+        data = llm_rerank._structured(_clarify_prompt(intent), ClarifySchema, model)
     except Exception:
         return _clarify_fallback(intent), False
 
@@ -462,6 +494,9 @@ def _score_prompt(candidates, intent: Intent) -> str:
         f'Reader summary: "{intent.summary}"\n'
         f"Structured intent: {_intent_block(intent)}\n\n"
         f"Candidates (choose ONLY from these book_ids: {ids}):\n{table}\n\n"
+        "Some candidates list similar_to_reader_favorite — a book this reader "
+        "already rated highly; treat that as a strong positive signal and you may "
+        "cite it in the reason.\n"
         "For every candidate, return a relevance score in [0,1], a one-clause "
         "reason tied to the intent, and a list of flags for any intent.avoid "
         'terms it triggers (e.g. "avoid:romance"; empty list if none).\n'
@@ -515,8 +550,10 @@ def score_candidates(candidates, intent: Intent, *, model: str = DEFAULT_MODEL,
         return _score_fallback(candidates, intent), False
 
     try:
-        raw = llm_rerank._call_gemini(_score_prompt(candidates, intent), model)
-        parsed = llm_rerank._parse_json_list(raw)
+        parsed = llm_rerank._structured(
+            _score_prompt(candidates, intent), SCORE_LIST_SCHEMA, model,
+            is_list=True, system=llm_rerank.PERSONA,
+        )
     except Exception:
         return _score_fallback(candidates, intent), False
 
@@ -558,9 +595,11 @@ def _rerank_prompt(candidates, scored, intent: Intent, top_k: int) -> str:
     for s in scored:
         c = by_id.get(s.book_id, {})
         flag_note = f", flags={s.flags}" if s.flags else ""
+        sim_note = (f', similar_to_reader_favorite="{c["similar_to"]}"'
+                    if c.get("similar_to") else "")
         lines.append(
             f"[{s.book_id}] \"{c.get('title', '?')}\" by {c.get('authors', '?')} "
-            f"— relevance={s.relevance}, note: {s.reason}{flag_note}"
+            f"— relevance={s.relevance}, note: {s.reason}{flag_note}{sim_note}"
         )
     scored_block = "\n".join(lines)
     ids = [s.book_id for s in scored]
@@ -579,6 +618,9 @@ def _rerank_prompt(candidates, scored, intent: Intent, top_k: int) -> str:
         "- For each pick, give a neutral one-sentence DESCRIPTION of what the book "
         "itself is about, plus a one-sentence EXPLANATION of why it earns this rank "
         "given the reader's intent.\n"
+        "- Make every EXPLANATION distinct and specific to that book — reference its "
+        "own story, tone, author, era, or rating, and how it compares to the other "
+        "picks. Never reuse the same reason or wording across picks.\n"
         "- Respond with STRICT JSON: a list of objects "
         '{"book_id": <int>, "description": "<one sentence about the book>", '
         '"explanation": "<one sentence on why it earns this rank>"} and nothing else.'
@@ -600,8 +642,75 @@ def _intent_phrase(intent: Intent) -> str:
     return phrase
 
 
+def _coerce_num(value):
+    """Best-effort float from a candidate field that may be '?'/None/str."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# Rank-specific framing so each pick reads differently even when two books match
+# for the same underlying reason.
+_RANK_PHRASES = {
+    1: "the collaborative filter's single strongest match for this reader",
+    2: "a close second from readers with similar taste",
+    3: "a strong third from readers with similar taste",
+}
+
+
+def _heuristic_why(c, scored: ScoredCandidate, intent: Intent, rank: int) -> str:
+    """Compose a DISTINCT, book-specific explanation for the offline fallback.
+
+    The live LLM writes these when a key is set; without one we synthesize a
+    reason from the book's own metadata — any matched intent terms, its era, its
+    average rating — plus its rank, so every pick reads differently instead of
+    repeating one generic line.
+    """
+    text = f"{c.get('title', '')} {c.get('authors', '')}".lower()
+    bits = []
+
+    # Strongest signal: grounded in the reader's own history (content-similarity).
+    similar_to = c.get("similar_to")
+    if similar_to:
+        bits.append(f"in the spirit of “{similar_to}” from your favorites")
+
+    matched = [t for t in intent.facet_terms() if t and t in text]
+    if matched:
+        uniq = list(dict.fromkeys(matched))[:2]
+        bits.append("its title signals " + " and ".join(f"“{m}”" for m in uniq))
+
+    year = _coerce_num(c.get("year"))
+    if year:
+        yr = int(year)
+        if intent.recency == "recent" and yr >= 2010:
+            bits.append(f"a recent {yr} title for your lean toward newer books")
+        elif intent.recency == "classic" and yr < 2000:
+            bits.append(f"a {yr} classic matching your taste for older books")
+
+    avg = _coerce_num(c.get("average_rating"))
+    if avg:
+        bits.append(f"highly rated at {avg:g}/5" if avg >= 4.3
+                    else f"rated {avg:g}/5 by readers")
+
+    rank_phrase = _RANK_PHRASES.get(rank, f"ranked #{rank} by readers with similar taste")
+
+    if scored.flags:                               # an avoid-term slipped through
+        cleaned = ", ".join(f.replace("avoid:", "") for f in scored.flags)
+        return (f"Kept lower because it leans into {cleaned}, which you asked to "
+                f"avoid — {rank_phrase}")
+    if bits:
+        why = bits[0][0].upper() + bits[0][1:]
+        if len(bits) > 1:
+            why += f", {bits[1]}"
+        return f"{why} — {rank_phrase}"
+    phrase = _intent_phrase(intent)
+    return rank_phrase + (f", fitting your taste for {phrase}" if phrase else "")
+
+
 def _rerank_fallback(candidates, scored, intent: Intent, top_k: int):
-    """Sort by Stage B relevance (avoid-flags last), then CF score."""
+    """Sort by Stage B relevance (avoid-flags last), then CF score, and give each
+    pick a distinct, metadata-grounded reason via ``_heuristic_why``."""
     by_id = {c["book_id"]: c for c in candidates}
     ranked = sorted(
         scored,
@@ -612,24 +721,57 @@ def _rerank_fallback(candidates, scored, intent: Intent, top_k: int):
         ),
         reverse=True,
     )
-    phrase = _intent_phrase(intent)
     picks = []
-    for s in ranked[:top_k]:
+    for rank, s in enumerate(ranked[:top_k], start=1):
         c = by_id.get(s.book_id, {})
-        why = s.reason or "ranked for your preference"
-        if phrase:
-            why = f"{why} — fits your taste for {phrase}" if s.reason else \
-                f"fits your taste for {phrase}"
         picks.append(
             RerankedPick(
                 book_id=s.book_id,
                 title=c.get("title", ""),
                 authors=c.get("authors", ""),
-                explanation=why,
+                explanation=_heuristic_why(c, s, intent, rank),
                 description=_describe_book(c),
             )
         )
     return picks
+
+
+def _series_key(title: str) -> str:
+    """Series name from a title like 'X (The Stormlight Archive, #2)' -> the
+    series; '' when the title names no series."""
+    m = re.search(r"\(([^,)]+)", title or "")
+    return m.group(1).strip().lower() if m else ""
+
+
+def _author_key(authors: str) -> str:
+    """First (primary) author, lower-cased, for the diversity cap."""
+    return (authors or "").split(",")[0].strip().lower()
+
+
+def _diversify(picks, top_k: int, max_per_author: int = 2):
+    """Trim an over-long ranked list to ``top_k`` while avoiding monotony:
+    at most ``max_per_author`` books per author and one book per series. Demoted
+    picks are kept as backfill so we always return up to ``top_k`` — diversity
+    never costs us results."""
+    kept, overflow = [], []
+    seen_authors: dict = {}
+    seen_series: set = set()
+    for p in picks:
+        a, s = _author_key(p.authors), _series_key(p.title)
+        if seen_authors.get(a, 0) >= max_per_author or (s and s in seen_series):
+            overflow.append(p)
+            continue
+        kept.append(p)
+        seen_authors[a] = seen_authors.get(a, 0) + 1
+        if s:
+            seen_series.add(s)
+        if len(kept) >= top_k:
+            break
+    for p in overflow:                              # backfill if caps left us short
+        if len(kept) >= top_k:
+            break
+        kept.append(p)
+    return kept[:top_k]
 
 
 def rerank_with_intent(candidates, scored, intent: Intent, top_k: int = 5, *,
@@ -644,10 +786,11 @@ def rerank_with_intent(candidates, scored, intent: Intent, top_k: int = 5, *,
         return _rerank_fallback(candidates, scored, intent, top_k), False
 
     try:
-        raw = llm_rerank._call_gemini(
-            _rerank_prompt(candidates, scored, intent, top_k), model
+        parsed = llm_rerank._structured(
+            _rerank_prompt(candidates, scored, intent, top_k),
+            llm_rerank.RERANK_LIST_SCHEMA, model, is_list=True,
+            system=llm_rerank.PERSONA,
         )
-        parsed = llm_rerank._parse_json_list(raw)
     except Exception:
         return _rerank_fallback(candidates, scored, intent, top_k), False
 
@@ -843,11 +986,14 @@ def run_pipeline(user_turns, candidates, top_k: int = 5, *,
         )
     )
 
-    # Stage C
+    # Stage C — fetch a few extra picks so the diversity pass has room to drop
+    # same-author / same-series clusters without falling short of top_k.
+    fetch_k = min(len(candidates), top_k + 3)
     picks, used_c = rerank_with_intent(
-        candidates, scored, intent, top_k=top_k,
+        candidates, scored, intent, top_k=fetch_k,
         model=model, force_fallback=force_fallback,
     )
+    picks = _diversify(picks, top_k)
     trace.append(
         StageTrace(
             name="Re-rank",

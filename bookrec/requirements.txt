@@ -8,7 +8,9 @@ streamlit
 scikit-surprise      # if pip can't build a wheel: conda install -c conda-forge scikit-surprise
 
 # LLM re-ranking layer (assignment)
-google-generativeai
+google-genai            # Week-4 SDK: structured output (response_schema) — preferred
+google-generativeai     # legacy text-only fallback if google-genai is unavailable
+pydantic                # typed response schemas for structured output
 python-dotenv
 
 # Optional "go beyond class" upgrades (in-memory vectors — no ChromaDB)

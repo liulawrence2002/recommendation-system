@@ -1,8 +1,11 @@
 [theme]
-primaryColor = "#4A6741"
-backgroundColor = "#FAFAF8"
-secondaryBackgroundColor = "#F0EDE6"
-textColor = "#1A1A1A"
+# Aligned with the app's warm-library palette in app.py (inject_css) so the
+# native widgets Streamlit paints before the CSS loads don't flash a clashing
+# green/grey. Values mirror --accent / --app-bg / --surface-soft / --ink.
+primaryColor = "#A35421"
+backgroundColor = "#F4ECDD"
+secondaryBackgroundColor = "#F0E6D4"
+textColor = "#2A2118"
 font = "sans serif"
 
 [server]

@@ -70,6 +70,37 @@ class ContentModel:
         out = [(self.books.iloc[i]["book_id"], float(sims[i])) for i in order if i != row]
         return out[:k]
 
+    # --- grounding: candidate -> the user's own favorite it most resembles --
+    def nearest_examples(self, candidate_ids, liked_ids):
+        """For each candidate, the single most content-similar book among the
+        user's ``liked_ids`` (books they rated highly).
+
+        Returns ``{candidate_id: (liked_book_id, similarity)}``, skipping any
+        candidate with no positive match. Used to *ground* the LLM re-ranker's
+        explanations in the reader's real history ("in the spirit of X, which you
+        rated highly") instead of letting the model guess from the title alone.
+        """
+        out = {}
+        liked = [(b, self._row_of[b]) for b in liked_ids if b in self._row_of]
+        if not liked or self.item_vectors is None:
+            return out
+        lids, lidx = zip(*liked)
+        L = self.item_vectors[list(lidx)]
+        for b in candidate_ids:
+            r = self._row_of.get(b)
+            if r is None:
+                continue
+            v = self.item_vectors[r]
+            sims = L @ (v.T if hasattr(v, "T") else v)
+            sims = (np.asarray(sims.todense()).ravel()
+                    if hasattr(sims, "todense") else np.asarray(sims).ravel())
+            order = np.argsort(-sims)
+            for j in order:                      # take the best match that isn't itself
+                if lids[j] != b and sims[j] > 0:
+                    out[b] = (lids[j], float(sims[j]))
+                    break
+        return out
+
     # --- user profile = liked-book vectors, rating-weighted -----------------
     def user_profile(self, user_ratings: pd.DataFrame, like_threshold: float = 4.0):
         """Mean of the vectors of books the user rated >= threshold (rating-weighted)."""

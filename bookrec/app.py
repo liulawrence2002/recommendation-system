@@ -66,10 +66,12 @@ RANDOM_STATE = 6604
 SOURCE_REAL = "Real dataset"
 SOURCE_SAMPLE = "Synthetic sample"
 
+# Held-out results from the project notebooks (90/10 split, seed 6604; UBCF/IBCF
+# k tuned by CV on train only). RMSE = rating accuracy; P/R/F1@10 = Top-N ranking.
 NOTEBOOK_METRICS = [
-    ("Baseline", 0.6568, 0.7912, 0.7178),
-    ("UBCF (pearson)", 0.6586, 0.7930, 0.7196),
-    ("IBCF (cosine)", 0.6414, 0.7734, 0.7012),
+    ("Baseline", 0.8423, 0.6568, 0.7912, 0.7178),
+    ("UBCF (pearson)", 1.0287, 0.6586, 0.7930, 0.7196),
+    ("IBCF (cosine)", 0.8565, 0.6414, 0.7734, 0.7012),
 ]
 
 MODEL_LABELS = {
@@ -2572,6 +2574,38 @@ def build_model(source: str, kind: str, k: int = DEFAULT_K):
     return cf_model.CFModel(kind=kind, k=k).fit(ratings)
 
 
+@st.cache_resource
+def build_content_model(source: str):
+    """TF-IDF content model over book metadata, used to ground the re-ranker:
+    for each CF candidate we find the reader's own highly-rated book it most
+    resembles. Cached so it's fit once per data source."""
+    _, books = load_data(source)
+    from src.content_model import ContentModel
+
+    b = books.copy()
+    if "tags" not in b.columns:  # the assignment catalog has no shelf tags
+        b["tags"] = ""
+    return ContentModel(backend="tfidf").fit(b)
+
+
+def compute_grounding(source, uid, ratings, books, cand_ids):
+    """Map each candidate book_id -> the title of the reader's most content-similar
+    favorite, for grounding the LLM/heuristic explanations. Never raises."""
+    try:
+        cm = build_content_model(source)
+        liked = ratings.loc[
+            (ratings["user_id"] == uid) & (ratings["rating"] >= 4.0), "book_id"
+        ].tolist()
+        title_of = dict(zip(books["book_id"], books["title"]))
+        return {
+            bid: title_of.get(lid, "")
+            for bid, (lid, _sim) in cm.nearest_examples(cand_ids, liked).items()
+            if title_of.get(lid)
+        }
+    except Exception:
+        return {}
+
+
 @st.cache_data(show_spinner="Evaluating models on a hold-out split...")
 def run_model_bakeoff(source: str, k: int, test_size: float = 0.1):
     ratings, _ = load_data(source)
@@ -2635,6 +2669,13 @@ def resolve_pending_chat(books) -> None:
     rounds_asked = sum(1 for m in messages if m.get("kind") == "clarify")
 
     cands = llm_rerank.candidates_from_recs(recs, books)
+    # Attach content-similarity grounding so the re-ranker can tie a pick to a
+    # book this reader already loved ("in the spirit of X").
+    grounding = st.session_state.get("grounding") or {}
+    for c in cands:
+        sim = grounding.get(c["book_id"])
+        if sim:
+            c["similar_to"] = sim
     result = rag_pipeline.run_pipeline(
         user_turns,
         cands,
@@ -2677,12 +2718,9 @@ inject_css()
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    try:
-        import google.generativeai  # noqa: F401
-
-        HAVE_GEMINI_SDK = True
-    except Exception:
-        HAVE_GEMINI_SDK = False
+    # Either Gemini SDK enables the live LLM layer: the new google-genai
+    # (preferred — structured output) or the legacy google-generativeai.
+    HAVE_GEMINI_SDK = llm_rerank._sdk_available()
 
 HAVE_GEMINI_KEY = bool(os.environ.get("GEMINI_API_KEY"))
 
@@ -2804,7 +2842,7 @@ st.markdown(
 with st.container(border=True):
     st.markdown('<div class="section-title">Filtering</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-copy">Filter by author and decade to shape the candidate pool the chat assistant will re-rank. Data source, model, and tuning live under Advanced options.</div>',
+        '<div class="section-copy">Select the reader to recommend for, then optionally filter by author and decade to shape the candidate pool the chat assistant will re-rank. Data source, model, and tuning live under Advanced options.</div>',
         unsafe_allow_html=True,
     )
 
@@ -2825,31 +2863,29 @@ with st.container(border=True):
         k_neighbors = st.slider("Neighborhood size", 5, 50, DEFAULT_UBCF_K)
         top_n = st.slider("Candidate count", 5, 30, 10)
         min_ratings = st.slider("Minimum ratings per book", 0, 200, DEFAULT_MIN_RATINGS)
-        # The reader override needs the loaded ratings, so reserve its slot and
-        # fill it once the catalog is available.
-        reader_slot = st.container()
 
     with st.spinner("Loading catalog..."):
         ratings, books = load_data(source)
 
     # UBCF needs a user; default to the most active reader unless overridden.
     auto_uid = auto_reader(ratings)
-    with reader_slot:
-        reader_choice = st.selectbox(
-            "Reader",
-            ["Auto"] + sorted(ratings["user_id"].unique())[:1000],
-            help="Auto uses the most active reader as the UBCF base. The chat does "
-                 "the real personalization on top of these candidates.",
-            key="reader_override",
-        )
-    uid = auto_uid if reader_choice == "Auto" else reader_choice
-
     author_opts = author_options(books)
     decade_opts = decade_options(books)
     genre_opts = genre_options(books)
 
+    # Reader selection is a primary control (the assignment asks the app to let a
+    # user be selected) — it sits up front with the author/decade filters.
     with base_filters:
-        author_col, decade_col = st.columns(2)
+        reader_col, author_col, decade_col = st.columns(3)
+        with reader_col:
+            reader_choice = st.selectbox(
+                "Reader (user to recommend for)",
+                ["Auto (most active)"] + sorted(ratings["user_id"].unique())[:1000],
+                help="The user the collaborative filter personalizes for. Auto uses "
+                     "the most active reader; the chat refines on top of these "
+                     "candidates.",
+                key="reader_override",
+            )
         with author_col:
             sel_authors = st.multiselect("Authors", author_opts, key="filt_authors")
         with decade_col:
@@ -2859,6 +2895,7 @@ with st.container(border=True):
         if genre_opts:
             sel_genres = st.multiselect("Genres", genre_opts, key="filt_genres")
 
+    uid = auto_uid if str(reader_choice).startswith("Auto") else reader_choice
     allowed_book_ids = filter_book_ids(books, sel_authors, sel_decades, sel_genres)
 
     current_config = (
@@ -2876,6 +2913,7 @@ with st.container(border=True):
         st.session_state["cf_recs"] = None
         st.session_state["chat_messages"] = []
         st.session_state["chat_pending"] = None
+        st.session_state["grounding"] = {}
 
     filter_pills = ""
     if sel_authors:
@@ -2913,6 +2951,11 @@ with st.container(border=True):
             st.session_state["rec_config"] = current_config
             st.session_state["chat_messages"] = []
             st.session_state["chat_pending"] = None
+            # Precompute content-similarity grounding for the chat re-ranker.
+            st.session_state["grounding"] = compute_grounding(
+                source, uid, ratings, books,
+                list(st.session_state["cf_recs"]["book_id"]),
+            )
         if allowed_book_ids is not None and st.session_state["cf_recs"].empty:
             st.warning(
                 "Your filters removed every candidate — relax a filter or lower "
@@ -3011,12 +3054,14 @@ st.markdown('<div id="quality" class="section"></div>', unsafe_allow_html=True)
 with st.expander("Advanced · Model quality & audit", expanded=False):
     st.markdown(
         "**Offline hold-out from the project notebooks** (fixed test set). "
-        "UBCF (pearson) is the best model."
+        "UBCF (pearson) wins the Top-N ranking metrics (best F1@10); the Baseline "
+        "wins RMSE — rating accuracy and ranking quality don't always agree, which "
+        "is why we report both."
     )
     st.dataframe(
         pd.DataFrame(
             NOTEBOOK_METRICS,
-            columns=["model", "P@10", "R@10", "F1@10"],
+            columns=["model", "RMSE", "P@10", "R@10", "F1@10"],
         ).set_index("model"),
         width="stretch",
     )
@@ -3068,7 +3113,7 @@ those CF candidates for personalization + explanations, cache/limit LLM calls to
 control cost, and graduate from offline Precision/Recall@K to **A/B-tested online
 lift** once live.
 
-*Model used for the AI layer: Google Gemini (`gemini-2.0-flash`). The API key is
+*Model used for the AI layer: Google Gemini (`gemini-2.5-flash-lite`). The API key is
 read from the environment and never committed; without it the app falls back to a
 transparent heuristic re-ranker so it always runs.*
 """
