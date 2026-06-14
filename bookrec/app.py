@@ -40,7 +40,7 @@ if not os.environ.get("GEMINI_API_KEY"):
 
 sys.path.insert(0, _APP_DIR)
 
-from src import data_loader, evaluate, llm_rerank, rag_pipeline, recommend  # noqa: E402
+from src import data_loader, llm_rerank, rag_pipeline, recommend  # noqa: E402
 from src.cf_model import PopularityModel  # noqa: E402
 
 try:
@@ -65,14 +65,6 @@ RANDOM_STATE = 6604
 
 SOURCE_REAL = "Real dataset"
 SOURCE_SAMPLE = "Synthetic sample"
-
-# Held-out results from the project notebooks (90/10 split, seed 6604; UBCF/IBCF
-# k tuned by CV on train only). RMSE = rating accuracy; P/R/F1@10 = Top-N ranking.
-NOTEBOOK_METRICS = [
-    ("Baseline", 0.8423, 0.6568, 0.7912, 0.7178),
-    ("UBCF (pearson)", 1.0287, 0.6586, 0.7930, 0.7196),
-    ("IBCF (cosine)", 0.8565, 0.6414, 0.7734, 0.7012),
-]
 
 MODEL_LABELS = {
     "ubcf": "User-based CF (best)",
@@ -1903,101 +1895,6 @@ def safe_text(value, fallback: str = "") -> str:
     return text or fallback
 
 
-def format_year(value) -> str:
-    try:
-        year = int(float(value))
-    except (TypeError, ValueError):
-        return "Year unknown"
-    return str(year) if year > 0 else "Year unknown"
-
-
-def format_number(value) -> str:
-    try:
-        return f"{int(float(value)):,}"
-    except (TypeError, ValueError):
-        return "0"
-
-
-def format_score(value) -> str:
-    try:
-        return f"{float(value):.3f}"
-    except (TypeError, ValueError):
-        return "0.000"
-
-
-def render_metric(label: str, value: str, note: str) -> None:
-    st.markdown(
-        f'<div class="metric-card">'
-        f'<div class="metric-label">{escape(label)}</div>'
-        f'<div class="metric-value">{escape(value)}</div>'
-        f'<div class="metric-note">{escape(note)}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def render_recommendation_cards(recs, books) -> None:
-    meta_cols = [
-        "book_id",
-        "original_publication_year",
-        "average_rating",
-        "ratings_count",
-    ]
-    # Pull the cover-image link straight from the catalog when present (the
-    # assignment dataset ships Goodreads `small_image_url`/`image_url`; the
-    # synthetic sample has neither, so we fall back to a placeholder tile).
-    for col in ("small_image_url", "image_url"):
-        if col in books.columns and col not in meta_cols:
-            meta_cols.append(col)
-    display = recs.merge(books[meta_cols], on="book_id", how="left")
-
-    cards = ['<div class="rec-list">']
-    for rank, row in enumerate(display.itertuples(index=False), start=1):
-        title_raw = safe_text(getattr(row, "title", None), "Untitled")
-        authors_raw = safe_text(getattr(row, "authors", None), "Unknown author")
-        title = escape(title_raw)
-        authors = escape(authors_raw)
-        year = escape(format_year(getattr(row, "original_publication_year", None)))
-        avg = format_score(getattr(row, "average_rating", None))
-        rating_count = escape(format_number(getattr(row, "ratings_count", None)))
-        score = escape(format_score(getattr(row, "score", None)))
-        cover = safe_text(getattr(row, "small_image_url", None)) or safe_text(
-            getattr(row, "image_url", None)
-        )
-        # Same cover + Goodreads link treatment as the chat pick cards.
-        link = escape(_goodreads_url(cover, title_raw, authors_raw))
-        if cover.startswith("http"):
-            cover_inner = (
-                f'<img class="rec-cover" src="{escape(cover)}" alt="" '
-                f'loading="lazy" referrerpolicy="no-referrer">'
-            )
-        else:
-            cover_inner = (
-                '<span class="rec-cover rec-cover--empty" aria-hidden="true">📖</span>'
-            )
-        cards.append(
-            f'<article class="rec-card">'
-            f'<div class="rank">{rank}</div>'
-            f'<a class="rec-cover-link" href="{link}" target="_blank" '
-            f'rel="noopener noreferrer">{cover_inner}</a>'
-            f'<div>'
-            f'<div class="rec-title">'
-            f'<a class="rec-title-link" href="{link}" target="_blank" '
-            f'rel="noopener noreferrer">{title}</a></div>'
-            f'<div class="rec-author">{authors}</div>'
-            f'<div class="rec-meta">'
-            f'<span>{year}</span>'
-            f'<span>Avg {avg}</span>'
-            f'<span>{rating_count} ratings</span>'
-            f'</div>'
-            f'</div>'
-            f'<div class="rec-score">Score {score}</div>'
-            f'</article>'
-        )
-    cards.append("</div>")
-    st.markdown("\n".join(cards), unsafe_allow_html=True)
-
-
 def render_intent_chips(intent) -> str:
     """A row of pills summarizing the DAG's extracted intent (Stage A).
 
@@ -2523,49 +2420,6 @@ def filter_book_ids(books, authors=None, decades=None, genres=None):
     return set(books.loc[mask, "book_id"])
 
 
-@st.cache_data
-def dataset_insights(ratings, books):
-    """Aggregates for the EDA / insights section (cached per dataset).
-
-    Surfaces the patterns that actually shape modeling on this data: the
-    positivity bias in ratings, the popularity long tail, the active-vs-casual
-    reader skew, sparsity, and the modern-skewed catalog.
-    """
-    out = {}
-    out["rating_dist"] = (
-        ratings["rating"].round(1).value_counts().sort_index().rename("ratings")
-    )
-    out["mean_rating"] = float(ratings["rating"].mean())
-    out["pct_4plus"] = float((ratings["rating"] >= 4).mean())
-
-    per_user = ratings.groupby("user_id").size()
-    out["per_user_median"] = int(per_user.median())
-    out["per_user_mean"] = float(per_user.mean())
-    out["per_user_max"] = int(per_user.max())
-
-    per_book = ratings.groupby("book_id").size().sort_values(ascending=False)
-    out["per_book_median"] = int(per_book.median())
-    top10pct_n = max(1, int(len(per_book) * 0.10))
-    out["top10pct_share"] = float(per_book.head(top10pct_n).sum() / per_book.sum())
-
-    top = per_book.head(10).rename("ratings").reset_index().merge(
-        books[["book_id", "title", "authors", "average_rating"]],
-        on="book_id", how="left",
-    )
-    out["top_books"] = top[["title", "authors", "ratings", "average_rating"]]
-
-    years = pd.to_numeric(books["original_publication_year"], errors="coerce")
-    years = years[years > 0]
-    decade_counts = (years // 10 * 10).astype(int).value_counts().sort_index()
-    decade_counts.index = [f"{d}s" for d in decade_counts.index]
-    out["decade_dist"] = decade_counts.rename("books")
-
-    out["sparsity"] = 1 - len(ratings) / (
-        ratings["user_id"].nunique() * ratings["book_id"].nunique()
-    )
-    return out
-
-
 @st.cache_resource
 def build_model(source: str, kind: str, k: int = DEFAULT_K):
     ratings, _ = load_data(source)
@@ -2604,23 +2458,6 @@ def compute_grounding(source, uid, ratings, books, cand_ids):
         }
     except Exception:
         return {}
-
-
-@st.cache_data(show_spinner="Evaluating models on a hold-out split...")
-def run_model_bakeoff(source: str, k: int, test_size: float = 0.1):
-    ratings, _ = load_data(source)
-    train, test = evaluate.train_test_split_ratings(
-        ratings, test_size=test_size, seed=RANDOM_STATE
-    )
-    if not HAVE_SURPRISE:
-        models = {"Popularity baseline": PopularityModel().fit(train)}
-    else:
-        models = {
-            "Baseline": cf_model.CFModel("baseline").fit(train),
-            "UBCF / pearson": cf_model.CFModel("ubcf", k=k).fit(train),
-            "IBCF / cosine": cf_model.CFModel("ibcf", k=k).fit(train),
-        }
-    return evaluate.compare_cf_models(train, test, models), len(train), len(test)
 
 
 class ScoreAdapter:
@@ -2745,7 +2582,6 @@ st.markdown(
     '</a>'
     '<div class="top-links">'
     '<a class="nav-pill" href="#filtering">Filter</a>'
-    '<a class="nav-pill" href="#candidates">Candidates</a>'
     '<a class="nav-pill" href="#personalize">Chat</a>'
     '</div>'
     f'<span class="nav-status"><span class="status-dot"></span>{escape(nav_status)}</span>'
@@ -2851,18 +2687,15 @@ with st.container(border=True):
     # we reserve their row here and fill it after the data has loaded below.
     base_filters = st.container()
 
-    # Everything that used to be a primary control is now collapsed by default.
-    with st.expander("Advanced options", expanded=False):
-        source = st.selectbox("Data source", [SOURCE_REAL, SOURCE_SAMPLE])
-        model_choices = (
-            ["ubcf", "ibcf", "baseline", "svd", "popularity"]
-            if HAVE_SURPRISE
-            else ["popularity"]
-        )
-        cf_kind = st.selectbox("Model", model_choices, format_func=model_label)
-        k_neighbors = st.slider("Neighborhood size", 5, 50, DEFAULT_UBCF_K)
-        top_n = st.slider("Candidate count", 5, 30, 10)
-        min_ratings = st.slider("Minimum ratings per book", 0, 200, DEFAULT_MIN_RATINGS)
+    # Model and tuning are fixed to the validated optimal configuration — no UI
+    # knobs. UBCF (pearson) won the Top-N ranking audit (best F1@10) with k tuned
+    # by CV; we fall back to the popularity model only if scikit-surprise is
+    # unavailable. The chat re-ranks these candidates on top.
+    source = SOURCE_REAL
+    cf_kind = "ubcf" if HAVE_SURPRISE else "popularity"
+    k_neighbors = DEFAULT_UBCF_K
+    top_n = 10
+    min_ratings = DEFAULT_MIN_RATINGS
 
     with st.spinner("Loading catalog..."):
         ratings, books = load_data(source)
@@ -2898,12 +2731,8 @@ with st.container(border=True):
     uid = auto_uid if str(reader_choice).startswith("Auto") else reader_choice
     allowed_book_ids = filter_book_ids(books, sel_authors, sel_decades, sel_genres)
 
+    # Model/tuning are now constant, so only the reader + filters drive a rebuild.
     current_config = (
-        source,
-        cf_kind,
-        k_neighbors,
-        top_n,
-        min_ratings,
         uid,
         tuple(sorted(sel_authors)),
         tuple(sorted(sel_decades)),
@@ -2927,8 +2756,6 @@ with st.container(border=True):
     st.markdown(
         f'<div class="pill-row">'
         f'<span class="pill">{escape(model_label(cf_kind))}</span>'
-        f'<span class="pill">Top {top_n}</span>'
-        f'<span class="pill">Min {min_ratings:,} book ratings</span>'
         f'{filter_pills}'
         f'</div>',
         unsafe_allow_html=True,
@@ -2961,163 +2788,6 @@ with st.container(border=True):
                 "Your filters removed every candidate — relax a filter or lower "
                 "the minimum ratings."
             )
-
-n_users = ratings["user_id"].nunique()
-n_books = len(books)
-n_ratings = len(ratings)
-sparsity = 1 - len(ratings) / (
-    ratings["user_id"].nunique() * ratings["book_id"].nunique()
-)
-
-metrics = st.columns(4)
-with metrics[0]:
-    render_metric("Users", f"{n_users:,}", "reader profiles")
-with metrics[1]:
-    render_metric("Books", f"{n_books:,}", "catalog items")
-with metrics[2]:
-    render_metric("Ratings", f"{n_ratings:,}", "observed signals")
-with metrics[3]:
-    render_metric("Sparsity", f"{sparsity:.1%}", "matrix empty")
-
-st.markdown('<div id="insights" class="section"></div>', unsafe_allow_html=True)
-with st.expander("Dataset insights — users, books & ratings (EDA)", expanded=False):
-    ins = dataset_insights(ratings, books)
-    chart_l, chart_r = st.columns(2)
-    with chart_l:
-        st.caption("How users rate — rating-value distribution")
-        st.bar_chart(ins["rating_dist"], color="#a35421")
-    with chart_r:
-        st.caption("Catalog by publication decade")
-        st.bar_chart(ins["decade_dist"], color="#7c4a23")
-    st.caption("Most-rated books — the head of the popularity long tail")
-    st.dataframe(ins["top_books"], hide_index=True, width="stretch")
-    st.markdown(
-        f"""
-**What the data shows**
-
-- **Positivity bias.** The mean rating is **{ins['mean_rating']:.2f} / 5** and
-  **{ins['pct_4plus']:.0%}** of all ratings are 4★ or higher — people mostly log
-  books they already liked. This inflates accuracy and makes a mean/popularity
-  benchmark hard to beat.
-- **Popularity is a long tail.** The top 10% most-rated books capture
-  **{ins['top10pct_share']:.0%}** of all ratings, while the median book has only
-  **{ins['per_book_median']}** ratings — a few blockbusters dominate.
-- **Active vs. casual readers.** The median reader has rated
-  **{ins['per_user_median']}** books (mean {ins['per_user_mean']:.0f}, max
-  {ins['per_user_max']:,}) — a classic power-user skew.
-- **Sparsity.** The user × book matrix is **{ins['sparsity']:.1%}** empty — most
-  users haven't rated most books. This is the core challenge for collaborative
-  filtering (cold-start, thin neighborhoods).
-- **Modern-skewed catalog.** Most titles are post-1990; pre-1900 decades are so
-  sparse they're grouped into a single "Before 1900s" filter bin.
-
-**Why it matters for modeling:** strong positivity + popularity concentration
-means a **popularity/mean baseline is a tough benchmark**, and sparsity limits
-neighborhood CF — exactly why we benchmark UBCF/IBCF against the baseline
-(*Advanced · Model quality & audit*) and add an LLM layer for personalization
-*beyond* popularity.
-"""
-    )
-
-st.markdown('<div id="candidates" class="section"></div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="section-title">Candidate list</div>'
-    '<div class="section-copy">This is the model-produced shortlist. The chat section below reorders these books without inventing new titles.</div>',
-    unsafe_allow_html=True,
-)
-
-recs = st.session_state.get("cf_recs")
-if recs is None:
-    with st.container(border=True):
-        st.markdown(
-            '<div class="empty-state"><div>'
-            '<div class="empty-title">No candidates yet</div>'
-            '<div>Use the filters above to generate a ranked list.</div>'
-            '</div></div>',
-            unsafe_allow_html=True,
-        )
-else:
-    st.markdown(
-        f'<div class="section-copy">{escape(model_label(cf_kind))} scored '
-        f'{len(recs):,} books matching your filters.</div>',
-        unsafe_allow_html=True,
-    )
-    render_recommendation_cards(recs, books)
-    with st.expander("Open as table"):
-        st.dataframe(
-            recs[["book_id", "title", "authors", "score"]],
-            width="stretch",
-            hide_index=True,
-        )
-
-st.markdown('<div id="quality" class="section"></div>', unsafe_allow_html=True)
-with st.expander("Advanced · Model quality & audit", expanded=False):
-    st.markdown(
-        "**Offline hold-out from the project notebooks** (fixed test set). "
-        "UBCF (pearson) wins the Top-N ranking metrics (best F1@10); the Baseline "
-        "wins RMSE — rating accuracy and ranking quality don't always agree, which "
-        "is why we report both."
-    )
-    st.dataframe(
-        pd.DataFrame(
-            NOTEBOOK_METRICS,
-            columns=["model", "RMSE", "P@10", "R@10", "F1@10"],
-        ).set_index("model"),
-        width="stretch",
-    )
-    st.markdown(
-        f"Or run a fresh 90/10 hold-out bake-off in this session (seed {RANDOM_STATE})."
-    )
-    if st.button("Run model audit", type="primary"):
-        st.session_state["eval_ran"] = True
-    if st.session_state.get("eval_ran"):
-        results, n_train, n_test = run_model_bakeoff(source, k_neighbors)
-        st.markdown(
-            f'<div class="section-copy">Live bake-off — train: {n_train:,} ratings, '
-            f'test: {n_test:,} ratings.</div>',
-            unsafe_allow_html=True,
-        )
-        st.dataframe(results, width="stretch")
-
-st.markdown('<div id="business" class="section"></div>', unsafe_allow_html=True)
-with st.expander("Business applications & recommended approach", expanded=False):
-    st.markdown(
-        """
-**Collaborative filtering (UBCF / IBCF).** Powers the "readers like you also
-enjoyed…" experience — catalog discovery, engagement, retention, and cross-sell.
-It's cheap to serve once trained and needs no content metadata, just the
-behavior signal the business already collects.
-
-**LLM re-ranking layer.** Turns a static Top-N into *natural-language,
-mood-aware* personalization with a short, explainable reason per pick ("why this
-book"). That drives conversational commerce, merchandising, and trust — it
-captures intent ("a cozy mystery, nothing gory") that ratings alone can't
-express, and it differentiates the UX.
-
-**Challenges a business would face**
-
-- *Collaborative filtering:* cold-start for new users/books, data **sparsity**,
-  popularity bias (the long tail above), scaling similarity to millions of
-  users, deciding retrain cadence, and the gap between offline metrics and real
-  online lift.
-- *LLM layer:* API **cost & latency** at scale, **grounding** (the model must
-  re-rank only real candidates, never invent books), prompt-injection/safety,
-  vendor lock-in and **API-key management**, reproducibility, and measuring
-  incremental value over plain CF.
-
-**Recommended approach for this dataset.** The EDA shows a strong popularity
-baseline and high sparsity, so: use **UBCF (pearson)** — the best CF model in our
-audit — to generate candidates, but keep the popularity/mean baseline as a
-guardrail and cold-start fallback. Layer the **LLM re-ranker** strictly on top of
-those CF candidates for personalization + explanations, cache/limit LLM calls to
-control cost, and graduate from offline Precision/Recall@K to **A/B-tested online
-lift** once live.
-
-*Model used for the AI layer: Google Gemini (`gemini-2.5-flash-lite`). The API key is
-read from the environment and never committed; without it the app falls back to a
-transparent heuristic re-ranker so it always runs.*
-"""
-    )
 
 st.markdown('<div id="personalize" class="section"></div>', unsafe_allow_html=True)
 with st.container(key="chat_stage"):
