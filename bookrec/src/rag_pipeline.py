@@ -513,6 +513,8 @@ def _score_fallback(candidates, intent: Intent):
     avoid = {a.lower() for a in intent.avoid}
     scored = []
     for c in candidates:
+        # The fallback only sees local metadata, so title/author text becomes the
+        # transparent proxy for genre, theme, and avoid-term matches.
         text = f"{c.get('title', '')} {c.get('authors', '')}".lower()
         hits = sum(1 for t in terms if t and t in text)
         flags = sorted({f"avoid:{a}" for a in avoid if a and a in text})
@@ -757,6 +759,8 @@ def _diversify(picks, top_k: int, max_per_author: int = 2):
     seen_authors: dict = {}
     seen_series: set = set()
     for p in picks:
+        # Apply diversity after ranking so relevance remains the primary signal;
+        # repeated author/series picks are demoted, not discarded.
         a, s = _author_key(p.authors), _series_key(p.title)
         if seen_authors.get(a, 0) >= max_per_author or (s and s in seen_series):
             overflow.append(p)
@@ -873,6 +877,8 @@ def run_pipeline(user_turns, candidates, top_k: int = 5, *,
     degrades to its heuristic independently.
     """
     # Stage A
+    # Every run starts by converting the free-form chat history into structured
+    # facets; later stages only consume this structured contract.
     intent, used_a = extract_intent(
         user_turns, model=model, force_fallback=force_fallback
     )

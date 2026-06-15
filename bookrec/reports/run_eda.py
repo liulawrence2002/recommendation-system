@@ -183,6 +183,8 @@ print(f"  books={books.shape}  ratings={ratings.shape}")
 
 stats: dict = {}
 
+# These overview numbers are reused by the figures, JSON export, and markdown
+# report; compute once so all outputs tell the same story.
 n_ratings = int(len(ratings))
 n_users = int(ratings["user_id"].nunique())
 n_books_rated = int(ratings["book_id"].nunique())
@@ -243,6 +245,8 @@ quality = pd.DataFrame({
               int((~ratings["rating"].between(1, 5)).sum())],
 })
 quality.to_csv(os.path.join(TBL_DIR, "data_quality.csv"), index=False)
+# Keep a JSON-friendly copy of the audit so the narrative report and figures can
+# cite the exact same counts as the CSV table.
 stats["data_quality"] = dict(zip(quality["check"], quality["count"].astype(int)))
 
 # =========================================================================== #
@@ -422,6 +426,8 @@ fig = styled_fig()
 header(fig, "Project 2 · Data at a glance",
        "A sparse, positively-skewed, blockbuster-driven catalog",
        "Six numbers that frame every modeling decision that follows.")
+# The executive cards are deliberately duplicated in the generated PDF deck, so
+# their values live here as data rather than being typed into slide code.
 cards = [
     (f"{n_ratings:,}", "Ratings in sample", TEAL),
     (f"{n_users:,}", "Unique readers", TEAL),
@@ -845,6 +851,7 @@ with open(os.path.join(REPORTS_DIR, "eda_summary.md"), "w", encoding="utf-8") as
 print("  saved eda_summary.md")
 
 # Console digest -----------------------------------------------------------
+# Final digest mirrors the report's headline metrics for a quick terminal check.
 print("\n" + "=" * 64)
 print("EDA COMPLETE — headline numbers")
 print("=" * 64)

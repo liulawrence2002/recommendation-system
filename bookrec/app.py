@@ -1948,6 +1948,8 @@ def model_label(kind: str) -> str:
     return MODEL_LABELS.get(kind, kind)
 
 
+# Small display-formatting helpers keep HTML rendering defensive: app data may
+# include None/NaN values from CSVs or synthetic sample frames.
 def safe_text(value, fallback: str = "") -> str:
     if value is None:
         return fallback
@@ -1997,6 +1999,8 @@ def render_recommendation_cards(recs, books) -> None:
             meta_cols.append(col)
     display = recs.merge(books[meta_cols], on="book_id", how="left")
 
+    # Build one HTML block and send it once; this avoids Streamlit inserting
+    # extra vertical gaps between recommendation cards.
     cards = ['<div class="rec-list">']
     for rank, row in enumerate(display.itertuples(index=False), start=1):
         title_raw = safe_text(getattr(row, "title", None), "Untitled")
@@ -2103,6 +2107,7 @@ def _trace_output_summary(name: str, output: dict) -> str:
     if not output:
         return ""
     if name == "Understand your request":
+        # Stage A output is best shown as compact facets rather than raw JSON.
         chips = []
         mood = safe_text(output.get("mood"))
         if mood:
@@ -2142,6 +2147,8 @@ def _trace_output_summary(name: str, output: dict) -> str:
             return "".join(rows)
         return '<div class="trace-line">Enough detail to go on — moving to the books.</div>'
     if name == "Rate every book":
+        # The trace keeps only the strongest few candidates so the explanation is
+        # readable even when the model scored a long shortlist.
         rows = []
         for s in output.get("scored", [])[:6]:
             title = safe_text(s.get("title")) or f"Book #{safe_text(s.get('book_id'))}"
@@ -2245,6 +2252,8 @@ def _turn_is_llm(message) -> bool:
     (just a question) the turn-level flag is what matters.
     """
     if message.get("kind") != "clarify":
+        # Recommendation turns can be mixed-mode; inspect the final Re-rank stage
+        # because that is what produced the visible prose and ordering.
         for stage in (message.get("trace") or []):
             if stage.get("name") == "Re-rank":
                 return bool(stage.get("used_llm"))
@@ -2361,6 +2370,8 @@ def render_assistant_message(message, book_meta=None) -> str:
     intent = message.get("intent") or {}
     lead_text = safe_text(intent.get("summary"))
     if not lead_text:
+        # Backward-compatible path for older stored messages that predate the
+        # structured Intent summary.
         pref = safe_text(message.get("pref"), "your request")
         verb = "Refined the shortlist" if message.get("refine") else "Here is your shortlist"
         lead_text = f"{verb} for “{pref}”."
@@ -2475,6 +2486,8 @@ def render_chat_thread(messages, pending: bool = False, book_meta=None) -> None:
 
 @st.cache_data
 def load_data(source: str):
+    # Data frames are pure inputs to the rest of the app, so cache by selected
+    # source and reuse across reruns triggered by UI interactions.
     if source == SOURCE_SAMPLE:
         return data_loader.load_sample()
     # Absolute path so the app works regardless of the working directory — on
@@ -2621,6 +2634,8 @@ def filter_book_ids(books, authors=None, decades=None, genres=None):
 
 @st.cache_resource
 def build_model(source: str, kind: str, k: int = DEFAULT_K):
+    # Model objects are heavier and mutable, so cache as resources rather than
+    # serializing them through st.cache_data.
     ratings, _ = load_data(source)
     if kind == "popularity" or not HAVE_SURPRISE:
         return PopularityModel().fit(ratings)
@@ -2760,6 +2775,8 @@ with warnings.catch_warnings():
 
 HAVE_GEMINI_KEY = bool(os.environ.get("GEMINI_API_KEY"))
 
+# Compact runtime health badge for the fixed nav: it tells the reader whether
+# recommendations are CF-backed, Gemini-backed, or running in fallback mode.
 if not HAVE_SURPRISE:
     nav_status = "Popularity mode"
 elif HAVE_GEMINI_KEY and HAVE_GEMINI_SDK:

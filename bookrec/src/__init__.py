@@ -18,6 +18,8 @@ llm_rerank    : LLM personalization layer - re-rank CF Top-N by a stated
                 preference, with explanations (Gemini; heuristic fallback).
 """
 
+# Explicit exports document the intended public modules for notebooks and the
+# Streamlit app; imports still stay lazy because this file does not import them.
 __all__ = [
     "sample_data",
     "data_loader",

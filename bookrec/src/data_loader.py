@@ -23,6 +23,8 @@ REQUIRED_BOOK_COLS = ["book_id", "title", "authors", "original_publication_year"
 
 def load_sample():
     """Synthetic data for development. See sample_data.make_sample."""
+    # Import lazily so pandas/numpy sample generation is only loaded when the
+    # caller explicitly asks for the synthetic catalog.
     from .sample_data import make_sample
     return make_sample()
 
@@ -59,6 +61,8 @@ def load(data_dir: str = "data", fix_encoding: bool = True):
     if fix_encoding:
         for col in ("authors", "title"):
             if col in books.columns:
+                # The assignment CSV has a few UTF-8 strings that were decoded
+                # as latin-1; repair display text before any UI/model use.
                 books[col] = books[col].map(_fix_mojibake)
 
     books["tags"] = ""                       # no shelf tags in this dataset
@@ -120,6 +124,8 @@ def _coerce_books(books: pd.DataFrame) -> pd.DataFrame:
         "ratings_count": 0, "tags": "", "genre": "",
     }
     for col, val in defaults.items():
+        # Downstream modules select these columns unconditionally, so create
+        # absent optional fields before filling missing values.
         if col not in books.columns:
             books[col] = val
         books[col] = books[col].fillna(val)

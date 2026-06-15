@@ -169,6 +169,8 @@ def _sdk_available() -> bool:
 
 
 def _have_gemini() -> bool:
+    # Both pieces are required: a key alone is not enough if neither Gemini SDK
+    # is installed, and an SDK alone cannot make authenticated calls.
     return bool(os.environ.get("GEMINI_API_KEY")) and _sdk_available()
 
 
@@ -306,6 +308,8 @@ def _parse_json_list(text: str):
 def _heuristic_rerank(candidates, preference, top_k):
     """Transparent offline fallback: boost candidates whose title/authors contain
     words from the stated preference, tie-broken by CF score. Clearly NOT an LLM."""
+    # Preference terms are intentionally simple and inspectable so a fallback
+    # ranking can be explained honestly in the UI.
     pref_terms = {w.lower() for w in re.findall(r"[a-zA-Z]+", preference)}
     scored = []
     for c in candidates:
@@ -349,6 +353,8 @@ def rerank(candidates, preference: str, top_k: int = 5,
         bid = item.get("book_id")
         if bid in by_id:                          # enforce: only real candidates
             c = by_id[bid]
+            # Trust the model for prose, but always recover missing descriptions
+            # from local metadata so UI cards stay complete.
             desc = str(item.get("description", "")).strip() or _synth_description(c)
             picks.append(RerankedPick(bid, c["title"], c.get("authors", ""),
                                       item.get("explanation", ""), description=desc))
@@ -365,6 +371,7 @@ def candidates_from_recs(recs_df, books):
     meta = books.set_index("book_id")
     out = []
     for r in recs_df.itertuples(index=False):
+        # Start with placeholders because many CSV fields are optional or NaN.
         year, avg = "?", "?"
         if r.book_id in meta.index:
             row = meta.loc[r.book_id]

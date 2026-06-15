@@ -13,6 +13,8 @@ import pandas as pd
 
 
 def popular_books(ratings: pd.DataFrame, min_ratings: int = 20) -> set:
+    # Popularity support filter keeps the first-pass CF list away from books
+    # whose scores are based on too little observed feedback.
     counts = ratings["book_id"].value_counts()
     return set(counts[counts >= min_ratings].index)
 
@@ -28,6 +30,8 @@ def recommend_top_n(user_id, hybrid, ratings: pd.DataFrame, books: pd.DataFrame,
     """
     seen = set(ratings.loc[ratings["user_id"] == user_id, "book_id"])
     pop = popular_books(ratings, min_ratings)
+    # Candidate universe: unseen books with enough support, optionally narrowed
+    # by UI filters before the model scores them.
     candidates = [b for b in books["book_id"] if b not in seen and b in pop]
     if not candidates:                          # tiny catalog / cold start fallback
         candidates = [b for b in books["book_id"] if b not in seen]
@@ -42,6 +46,8 @@ def recommend_top_n(user_id, hybrid, ratings: pd.DataFrame, books: pd.DataFrame,
     author_of = dict(zip(books["book_id"], books["authors"]))
     rows = []
     for book_id, sc in top.items():
+        # Build a display-ready row here so app/notebook callers do not each
+        # need to repeat title/author joins.
         row = {"book_id": book_id, "title": title_of.get(book_id, "?"),
                "authors": author_of.get(book_id, "?"), "score": round(float(sc), 4)}
         if explain and getattr(hybrid, "content", None) is not None:

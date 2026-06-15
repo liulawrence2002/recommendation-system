@@ -57,6 +57,8 @@ def ranking_metrics(score_user_items, train: pd.DataFrame, test: pd.DataFrame,
 
     precisions, recalls, ndcgs = [], [], []
     for uid, items in test_by_user.items():
+        # Evaluation ranks only the held-out items for that user. This mirrors
+        # the class exercise and isolates ordering quality from candidate recall.
         book_ids = [b for b, _ in items]
         true_r = dict(items)
         scores = score_user_items(uid, book_ids)
@@ -70,6 +72,7 @@ def ranking_metrics(score_user_items, train: pd.DataFrame, test: pd.DataFrame,
         if n_relevant > 0:
             recalls.append(n_hits / n_relevant)
         # NDCG with binary relevance
+        # Ideal DCG uses the user's own held-out relevance labels as the ceiling.
         gains = [1.0 if true_r[b] >= threshold else 0.0 for b in topk]
         ideal = sorted([1.0 if t >= threshold else 0.0 for _, t in items], reverse=True)[:k]
         idcg = _dcg(ideal)
@@ -99,6 +102,8 @@ def compare_cf_models(train: pd.DataFrame, test: pd.DataFrame,
     """
     rows = []
     for name, model in models.items():
+        # Close over each model explicitly so the metric helper sees a uniform
+        # score_user_items(user_id, book_ids) callable.
         def scorer(m):
             def f(user_id, book_ids):
                 return m.predict_for_user(user_id, book_ids)

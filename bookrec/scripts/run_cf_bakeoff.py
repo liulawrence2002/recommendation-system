@@ -36,6 +36,8 @@ def main() -> None:
     print(f"Train: {len(train)} ratings  |  Test: {len(test)} ratings")
 
     models = {
+        # BaselineOnly is the Surprise global/user/item mean benchmark; UBCF and
+        # IBCF are the class-notebook neighborhood models under the same split.
         "Baseline": cf_model.CFModel("baseline").fit(train),
         "UBCF pearson": cf_model.CFModel("ubcf", k=K_NEIGHBORS).fit(train),
         "IBCF cosine": cf_model.CFModel("ibcf", k=K_NEIGHBORS).fit(train),
@@ -52,6 +54,8 @@ def main() -> None:
 
         def top_n(model, user_id: int, n: int = TOP_N):
             class Adapter:
+                # recommend_top_n expects a hybrid-like .score method; this
+                # adapter lets plain CF models plug into the same path.
                 def score(self, uid, user_ratings, candidate_ids):
                     return model.predict_for_user(uid, candidate_ids)
 

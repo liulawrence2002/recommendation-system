@@ -23,6 +23,8 @@ from __future__ import annotations
 import os
 import numpy as np
 import matplotlib
+# Headless backend: this script is meant to run from the CLI and save a PNG,
+# not open an interactive plotting window.
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import font_manager
@@ -50,10 +52,14 @@ plt.rcParams.update({
 
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deliverable images")
 os.makedirs(OUT_DIR, exist_ok=True)
+# The source note is baked into the chart footer so the exported image remains
+# citation-ready after it is moved into a deck.
 SOURCE = ("Source: erika model notebooks, Step 5 held-out evaluation "
           "(90/10 split, seed 6604; k tuned by CV on train only)")
 
 # --- held-out results (Step 5 / cell 28) ----------------------------------- #
+# Keep audited notebook numbers explicit here instead of recomputing them; that
+# makes the deliverable figure reproducible even without rerunning Surprise.
 MODELS = ["Baseline", "UBCF\n(pearson)", "IBCF\n(cosine)"]
 COLORS = [TEAL, TERRA, GOLD]
 RMSE = [0.8423, 1.0287, 0.8565]

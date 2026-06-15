@@ -16,6 +16,8 @@ RATING_SCALE = (1.0, 5.0)   # this dataset uses 1..5 stars
 
 
 def _require_surprise():
+    # Keep Surprise optional at import time: the app can still run its
+    # popularity baseline and LLM fallback on machines without compiled wheels.
     try:
         import surprise  # noqa: F401
         return surprise
@@ -71,6 +73,7 @@ class PopularityModel:
         g = ratings.groupby("book_id")["rating"]
         means, counts = g.mean(), g.count()
         # Bayesian-shrunk mean: pull low-count books toward the global mean
+        # so one or two enthusiastic ratings do not dominate the baseline.
         shrunk = (counts * means + self.shrinkage * self.global_mean) / (counts + self.shrinkage)
         self.book_mean = shrunk.to_dict()
         return self
@@ -95,6 +98,8 @@ class CFModel:
     def fit(self, ratings: pd.DataFrame, trainset=None):
         if trainset is None:
             trainset = build_dataset(ratings).build_full_trainset()
+        # Accepting an external trainset lets evaluation notebooks reuse the
+        # exact same split instead of silently rebuilding on all ratings.
         self.algo.fit(trainset)
         self._global_mean = trainset.global_mean
         return self

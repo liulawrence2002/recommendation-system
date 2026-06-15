@@ -40,16 +40,22 @@ class ContentModel:
 
     def fit(self, books: pd.DataFrame):
         self.books = books.reset_index(drop=True)
+        # Row lookup keeps similarity code fast and avoids repeated DataFrame
+        # filtering when scoring thousands of candidate ids.
         self._row_of = {bid: i for i, bid in enumerate(self.books["book_id"])}
         docs = _content_document(self.books)
 
         if self.backend == "tfidf":
+            # Unigrams + bigrams capture titles/authors and common shelf phrases
+            # while staying lightweight enough for Streamlit startup.
             self.vectorizer = TfidfVectorizer(
                 ngram_range=(1, 2), min_df=1, max_df=0.9,
                 stop_words="english", sublinear_tf=True)
             X = self.vectorizer.fit_transform(docs)        # sparse, already L2-normalized
             self.item_vectors = normalize(X)               # be explicit
         elif self.backend == "embeddings":
+            # Optional semantic path: the public API stays identical because the
+            # rest of the class only needs an item_vectors matrix.
             from sentence_transformers import SentenceTransformer
             model = SentenceTransformer(self.embed_model)
             emb = model.encode(list(docs), normalize_embeddings=True,
@@ -64,6 +70,7 @@ class ContentModel:
         if book_id not in self._row_of:
             return []
         row = self._row_of[book_id]
+        # With L2-normalized vectors, cosine similarity is just a dot product.
         sims = (self.item_vectors @ self.item_vectors[row].T)
         sims = np.asarray(sims.todense()).ravel() if hasattr(sims, "todense") else np.asarray(sims).ravel()
         order = np.argsort(-sims)
@@ -121,6 +128,7 @@ class ContentModel:
             book_ids = list(self.books["book_id"])
         prof = self.user_profile(user_ratings)
         if prof is None:                               # cold user: no liked books yet
+            # Preserve the requested index/order even when content has no signal.
             return pd.Series(0.0, index=book_ids, name="content_score")
         rows = [self._row_of.get(b) for b in book_ids]
         valid = [(b, r) for b, r in zip(book_ids, rows) if r is not None]

@@ -35,6 +35,8 @@ def make_sample(n_users: int = 400, n_books: int = 600,
     rng = np.random.default_rng(seed)
 
     # --- books: each book belongs to one or two genres ----------------------
+    # The generated titles/tags intentionally expose the latent genre signal so
+    # the content model has something meaningful to learn during demos.
     book_genres, authors, titles, tags = [], [], [], []
     for b in range(n_books):
         k = rng.integers(1, 3)                       # 1 or 2 genres
@@ -66,6 +68,8 @@ def make_sample(n_users: int = 400, n_books: int = 600,
             book_mat[b, g_index[g]] = 1.0
 
     # --- users: each has a latent taste vector over genres ------------------
+    # Positive/negative weights create user-specific taste profiles rather than
+    # one global popularity pattern.
     user_taste = rng.normal(size=(n_users, len(GENRES)))
 
     # --- ratings: sample (user, book) pairs, rate by taste . genre + noise --
@@ -77,6 +81,8 @@ def make_sample(n_users: int = 400, n_books: int = 600,
     stars = np.clip(np.round(stars), 1, 5)
 
     ratings = (pd.DataFrame({"user_id": u, "book_id": b, "rating": stars})
+               # Collapse duplicate sampled pairs so the synthetic data matches
+               # the one-rating-per-user-book contract used by real Goodreads data.
                .drop_duplicates(subset=["user_id", "book_id"])   # one rating per pair
                .reset_index(drop=True))
     ratings["rating"] = ratings["rating"].astype(float)

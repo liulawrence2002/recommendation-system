@@ -17,6 +17,8 @@ import pandas as pd
 
 def _cf_scores_to_unit(cf_scores: pd.Series, scale=(1.0, 5.0)) -> pd.Series:
     lo, hi = scale
+    # CF models emit star-scale predictions; hybrid blending needs the same
+    # 0..1 scale used by the content cosine scores.
     return ((cf_scores - lo) / (hi - lo)).clip(0, 1)
 
 
@@ -32,6 +34,7 @@ class HybridRecommender:
 
     def score(self, user_id, user_ratings: pd.DataFrame, candidate_ids) -> pd.Series:
         """Return a blended score per candidate book_id (higher = better)."""
+        # Materialize once so every branch can reindex back to the same order.
         candidate_ids = list(candidate_ids)
         n_hist = len(user_ratings)
 
@@ -40,6 +43,8 @@ class HybridRecommender:
                           else pd.Series(0.0, index=candidate_ids))
 
         # cold user with no usable CF signal -> content only
+        # This switch is the main guardrail against recommending from a CF model
+        # before the user has enough history to be comparable to neighbors.
         cf_available = self.cf is not None and n_hist >= self.min_ratings_for_cf
         if not cf_available:
             return content_scores.reindex(candidate_ids).fillna(0.0)

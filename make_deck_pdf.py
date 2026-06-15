@@ -12,6 +12,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 IMG = os.path.join(ROOT, "deliverable images")
+# Fixed canvas and font paths keep the PDF layout deterministic across machines
+# where the Windows Segoe UI fonts are available.
 W, H = 1920, 1080
 FD = "C:/Windows/Fonts/"
 
@@ -22,6 +24,8 @@ SOFT=(219,229,242); MUTED_D=(150,168,186)
 MOTIF=(20,50,91); RING=(32,75,161)  # precomputed blends over navy
 
 def F(kind, size):
+    # Small local font factory: all drawing functions ask for logical styles
+    # ("bold", "reg", etc.) instead of repeating font filenames.
     f = {"bold":"segoeuib.ttf","reg":"segoeui.ttf","light":"segoeuil.ttf",
          "sl":"segoeuisl.ttf"}[kind]
     return ImageFont.truetype(FD+f, size)
@@ -35,6 +39,8 @@ def tracked(d, x, y, text, font, fill, tr=2):
     return cx
 
 def wrap_lines(d, text, font, maxw):
+    # Pillow does not wrap text for us, so measure candidate lines and break
+    # before they exceed the slide's content width.
     words, lines, cur = text.split(" "), [], ""
     for w in words:
         t = (cur+" "+w).strip()
@@ -131,6 +137,7 @@ EXHIBITS = [
 ]
 EX_SRC = "Source: bookrec/reports · run_eda.py (figures) · held-out evaluation, notebooks (model bake-off)"
 for fn, eye, title, page in EXHIBITS:
+    # Exhibit slides all share the same chrome and only swap the rendered chart.
     im, d = new_slide()
     chrome(d, eye, title, page, EX_SRC)
     cx,cy,cw,ch = 291,244,1337,752
