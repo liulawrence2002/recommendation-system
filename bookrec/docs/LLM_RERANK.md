@@ -23,7 +23,7 @@ The assignment requires an LLM that **re-ranks** collaborative-filtering Top-N c
 - **Constraint**: explicit list of valid IDs; "Do NOT invent books."
 - **Output**: strict JSON array, `top_k` items, preference-tied explanations.
 
-**Provider / model (cite in slides):** Google Gemini, `gemini-2.0-flash` (override via `rerank(..., model=...)`).
+**Provider / model (cite in slides):** Google Gemini, `gemini-2.5-flash-lite` (override via `rerank(..., model=...)`).
 
 ## Environment setup
 

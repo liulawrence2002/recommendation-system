@@ -67,7 +67,7 @@ SOURCE_REAL = "Real dataset"
 SOURCE_SAMPLE = "Synthetic sample"
 
 MODEL_LABELS = {
-    "ubcf": "User-based CF (best)",
+    "ubcf": "User-based CF",
     "ibcf": "Item-based CF",
     "baseline": "Baseline means",
     "svd": "SVD",
@@ -2499,9 +2499,8 @@ def load_data(source: str):
 def auto_reader(ratings):
     """Pick a sensible default reader for UBCF: the most active rater.
 
-    The reader is no longer a primary control — UBCF still needs a user to
-    personalize for, so we default to the reader with the richest history (the
-    most signal for the model). The chat does the real personalization on top.
+    Reader selection is exposed in the app, and the automatic choice defaults to
+    the reader with the richest history so UBCF has the most signal.
     """
     return ratings["user_id"].value_counts().idxmax()
 
@@ -2895,7 +2894,7 @@ st.markdown(
 with st.container(border=True):
     st.markdown('<div class="section-title">Filtering</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-copy">Select the reader to recommend for, then optionally filter by author and decade to shape the candidate pool the chat assistant will re-rank. Data source, model, and tuning live under Advanced options.</div>',
+        '<div class="section-copy">Select the reader to recommend for, then optionally filter by author and decade to shape the candidate pool the chat assistant will re-rank.</div>',
         unsafe_allow_html=True,
     )
 

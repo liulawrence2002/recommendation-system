@@ -87,8 +87,8 @@ CF may struggle; popularity skew → strong baseline).
   enforces this by accepting only candidate `book_id`s.
 - Prompt strategy: structured JSON output, explicit "choose only from these ids,"
   one-sentence preference-grounded explanation each. Experiment with prompt
-  styles and note what worked. Cite **provider + model** (Gemini recommended,
-  free; e.g. `gemini-2.0-flash`).
+  styles and note what worked. Cite **provider + model** (Gemini recommended;
+  this project uses `gemini-2.5-flash-lite`).
 
 **Business discussion.** Applications of CF (scalable, behavior-driven, cold-start
 weak) vs the LLM layer (flexible, explainable, controllable, but cost/latency and
