@@ -668,6 +668,43 @@ def inject_css() -> None:
             white-space: normal;
         }
 
+        /* Clarify answer chips — rendered directly under the question, above the
+           text box, with an accent so they read as "tap to answer". */
+        .st-key-chat_clarify {
+            margin: 0.4rem auto 0.5rem;
+            max-width: 768px;
+        }
+
+        .clarify-answer-label {
+            color: var(--accent);
+            font-size: 0.82rem;
+            font-weight: 760;
+            letter-spacing: 0.01em;
+            margin: 0 auto 0.6rem;
+            max-width: 768px;
+            text-align: center;
+        }
+
+        .st-key-chat_clarify .stButton > button {
+            background: var(--surface) !important;
+            border: 1.5px solid var(--accent) !important;
+            border-radius: 999px !important;
+            box-shadow: 0 8px 24px rgba(163, 84, 33, 0.10);
+            color: var(--ink) !important;
+            font-weight: 720 !important;
+            min-height: 3.1rem;
+            padding-left: 1.05rem !important;
+            padding-right: 1.05rem !important;
+            white-space: normal;
+        }
+
+        .st-key-chat_clarify .stButton > button:hover:not(:disabled) {
+            background: var(--accent-soft) !important;
+            border-color: var(--accent) !important;
+            box-shadow: 0 12px 30px rgba(163, 84, 33, 0.16);
+            transform: translateY(-1px);
+        }
+
         .chat-thread {
             display: flex;
             flex-direction: column;
@@ -744,6 +781,34 @@ def inject_css() -> None:
             color: var(--muted);
             font-size: 0.74rem;
             margin-top: 0.9rem;
+        }
+
+        /* Visible notice when a reply came from the rule-based fallback rather
+           than live LLM re-ranking (e.g. Gemini quota hit). */
+        .fallback-note {
+            align-items: center;
+            background: #f6e7d0;
+            border: 1px solid #e6c79a;
+            border-radius: 10px;
+            color: #8a3f12;
+            display: flex;
+            font-size: 0.82rem;
+            gap: 0.55rem;
+            line-height: 1.45;
+            margin: 0.55rem 0 0.2rem;
+            padding: 0.55rem 0.75rem;
+        }
+
+        .fallback-note-badge {
+            background: #8a3f12;
+            border-radius: 999px;
+            color: #fbf6ec;
+            flex: 0 0 auto;
+            font-size: 0.66rem;
+            font-weight: 760;
+            letter-spacing: 0.04em;
+            padding: 0.16rem 0.5rem;
+            text-transform: uppercase;
         }
 
         .thinking {
@@ -2170,6 +2235,54 @@ def render_reasoning_trace(trace) -> str:
     )
 
 
+def _turn_is_llm(message) -> bool:
+    """True if the live LLM produced the visible content of this assistant turn.
+
+    For a recommendations turn the picks' descriptions/explanations come from the
+    Re-rank stage, so that stage's flag is the honest signal (a turn can have an
+    LLM intent step but a heuristic re-rank if quota runs out mid-turn). If the
+    stage is missing we fall back to the turn-level used_llm. For a clarify turn
+    (just a question) the turn-level flag is what matters.
+    """
+    if message.get("kind") != "clarify":
+        for stage in (message.get("trace") or []):
+            if stage.get("name") == "Re-rank":
+                return bool(stage.get("used_llm"))
+    return bool(message.get("used_llm"))
+
+
+def _fallback_notice(message) -> str:
+    """A visible banner shown when a reply was served by the rule-based fallback
+    instead of live LLM re-ranking, so heuristic results are never silently
+    mistaken for AI ones. Returns "" when the LLM produced the turn."""
+    if _turn_is_llm(message):
+        return ""
+    if HAVE_GEMINI_KEY and HAVE_GEMINI_SDK:
+        # Key + SDK are present, so the call itself failed — almost always the
+        # Gemini free-tier rate limit / quota, sometimes a transient network error.
+        text = (
+            "Live AI re-ranking was unavailable for this reply (usually the Gemini "
+            "free-tier rate limit) — these results use BookRec’s built-in rule-based "
+            "ranking instead."
+        )
+    elif HAVE_GEMINI_KEY and not HAVE_GEMINI_SDK:
+        text = (
+            "The Gemini SDK isn’t installed, so this reply uses BookRec’s built-in "
+            "rule-based ranking. Install google-genai to enable live AI re-ranking."
+        )
+    else:
+        text = (
+            "Live AI re-ranking isn’t configured, so this reply uses BookRec’s "
+            "built-in rule-based ranking. Set a GEMINI_API_KEY to enable it."
+        )
+    return (
+        '<div class="fallback-note">'
+        '<span class="fallback-note-badge">Rule-based</span>'
+        f'<span>{escape(text)}</span>'
+        '</div>'
+    )
+
+
 def render_clarify_message(message) -> str:
     """Build the HTML for an assistant turn that asks a clarifying question.
 
@@ -2186,9 +2299,10 @@ def render_clarify_message(message) -> str:
         '<div class="assistant-avatar">B</div>',
         '<div class="assistant-body">',
         '<div class="assistant-name">BookRec</div>',
+        _fallback_notice(message),
         f'<div class="assistant-lead">{question}</div>',
         render_intent_chips(intent),
-        '<div class="clarify-hint">Choose an option below, type your own answer, '
+        '<div class="clarify-hint">Tap one of the suggested answers, type your own, '
         'or skip straight to recommendations.</div>',
         render_reasoning_trace(message.get("trace")),
     ]
@@ -2258,6 +2372,7 @@ def render_assistant_message(message, book_meta=None) -> str:
         '<div class="assistant-avatar">B</div>',
         '<div class="assistant-body">',
         '<div class="assistant-name">BookRec</div>',
+        _fallback_notice(message),
         f'<div class="assistant-lead">{lead}</div>',
         render_intent_chips(intent),
         '<div class="pick-list">',
@@ -2950,14 +3065,65 @@ with st.container(key="chat_stage"):
 
     composer_disabled = pending or not has_recs
 
+    # Picks count (Depth control). Read from session_state so it's available
+    # BEFORE the selectbox is re-instantiated below — the clarify answer chips,
+    # which now render above the text box, need it too.
+    personalized_k = (
+        5 if st.session_state.get("chat_depth", "Focused") == "Focused" else 8
+    )
+
+    # When the assistant paused to ask a clarifying question, show the tappable
+    # answers RIGHT under the question (above the text box) with a clear label,
+    # so how to reply is obvious. You can still type your own answer or skip.
+    if awaiting_clarify:
+        clarify_options = [
+            o for o in (last_message.get("options") or []) if str(o).strip()
+        ]
+        with st.container(key="chat_clarify"):
+            st.markdown(
+                '<div class="clarify-answer-label">'
+                'Tap an answer below — or type your own in the box and hit Send'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            if clarify_options:
+                chip_cols = st.columns(len(clarify_options), gap="small")
+                for col, option in zip(chip_cols, clarify_options):
+                    with col:
+                        if st.button(
+                            option,
+                            key=f"clarify_opt_{option}",
+                            disabled=composer_disabled,
+                            width="stretch",
+                        ):
+                            submit_chat_message(option, personalized_k)
+                            st.rerun()
+        skip_cols = st.columns(2, gap="small")
+        with skip_cols[0]:
+            if st.button("↻ Start a new chat", width="stretch", disabled=pending):
+                st.session_state["chat_messages"] = []
+                st.session_state["chat_pending"] = None
+                st.session_state["clear_chat_input"] = True
+                st.rerun()
+        with skip_cols[1]:
+            if st.button(
+                "Just recommend something →",
+                disabled=composer_disabled,
+                width="stretch",
+            ):
+                submit_chat_message(
+                    "Just recommend something", personalized_k, skip_clarify=True
+                )
+                st.rerun()
+
     with st.container(key="chat_composer"):
         chat_pref = st.text_area(
             "Personalization prompt",
             key="chat_pref",
             label_visibility="collapsed",
             placeholder=(
-                "Refine your shortlist — adjust tone, pace, setting, tropes to "
-                "avoid, or steer it somewhere new..."
+                "Type your answer, or refine — adjust tone, pace, setting, "
+                "tropes to avoid, or steer it somewhere new..."
                 if refining
                 else "Ask for dark academia, a cozy mystery, fast-paced sci-fi, "
                 "or whatever mood you're in..."
@@ -2970,9 +3136,10 @@ with st.container(key="chat_stage"):
             vertical_alignment="center",
         )
         with control_cols[1]:
-            chat_mode = st.selectbox(
+            st.selectbox(
                 "Depth",
                 ["Focused", "Extended"],
+                key="chat_depth",
                 label_visibility="collapsed",
                 help="Focused returns 5 picks; Extended returns 8.",
             )
@@ -2984,44 +3151,13 @@ with st.container(key="chat_stage"):
                 width="stretch",
             )
 
-    personalized_k = 5 if chat_mode == "Focused" else 8
-
     if send and chat_pref.strip():
         submit_chat_message(chat_pref.strip(), personalized_k)
         st.rerun()
 
-    if awaiting_clarify:
-        clarify_options = [
-            o for o in (last_message.get("options") or []) if str(o).strip()
-        ]
-        with st.container(key="chat_suggestions"):
-            if clarify_options:
-                chip_cols = st.columns(len(clarify_options), gap="small")
-                for col, option in zip(chip_cols, clarify_options):
-                    with col:
-                        if st.button(
-                            option, disabled=composer_disabled, width="stretch"
-                        ):
-                            submit_chat_message(option, personalized_k)
-                            st.rerun()
-        skip_cols = st.columns([0.5, 0.22, 0.28])
-        with skip_cols[2]:
-            if st.button(
-                "Just recommend something →",
-                disabled=composer_disabled,
-                width="stretch",
-            ):
-                submit_chat_message(
-                    "Just recommend something", personalized_k, skip_clarify=True
-                )
-                st.rerun()
-        with skip_cols[0]:
-            if st.button("↻ Start a new chat", width="stretch", disabled=pending):
-                st.session_state["chat_messages"] = []
-                st.session_state["chat_pending"] = None
-                st.session_state["clear_chat_input"] = True
-                st.rerun()
-    elif refining:
+    # Suggestion chips under the box: refine chips after a recommendation,
+    # starter chips before the first turn. (Clarify answers render above the box.)
+    if refining and not awaiting_clarify:
         refine_chips = [
             "Make them darker and moodier",
             "Lean more recent",
@@ -3042,7 +3178,7 @@ with st.container(key="chat_stage"):
                 st.session_state["chat_pending"] = None
                 st.session_state["clear_chat_input"] = True
                 st.rerun()
-    else:
+    elif not refining:
         starter_chips = [
             "Something fast-paced and adventurous",
             "A thoughtful literary list with emotional depth",

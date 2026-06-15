@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -204,6 +205,23 @@ def _to_plain(parsed):
 _LLM_CACHE: dict = {}
 _LLM_CACHE_MAX = 256
 
+# A single transient 429 used to drop the whole turn to the rule-based fallback.
+# The free tier's per-minute (RPM) burst limit clears in a second or two, so we
+# retry a rate-limited call a couple of times with exponential backoff before
+# giving up. Non-rate-limit errors (and a genuinely exhausted daily quota) still
+# fall through fast to the heuristic.
+_LLM_MAX_RETRIES = 2
+_LLM_RETRY_BASE = 1.0  # seconds; backoff is _LLM_RETRY_BASE * 2**attempt -> ~1s, 2s
+
+
+def _is_rate_limit(exc) -> bool:
+    """True if an exception looks like a Gemini 429 / quota error. Robust across
+    SDK versions: checks the structured status code and the message text."""
+    if getattr(exc, "code", None) == 429:
+        return True
+    text = str(exc).lower()
+    return any(s in text for s in ("429", "resource_exhausted", "rate limit", "quota"))
+
 
 def _cache_key(prompt: str, schema, model: str, system: str | None):
     schema_name = getattr(schema, "__name__", None) or repr(schema)
@@ -227,7 +245,17 @@ def _structured(prompt: str, schema, model: str = DEFAULT_MODEL, *,
     if key in _LLM_CACHE:
         return copy.deepcopy(_LLM_CACHE[key])
 
-    result = _structured_uncached(prompt, schema, model, is_list=is_list, system=system)
+    for attempt in range(_LLM_MAX_RETRIES + 1):
+        try:
+            result = _structured_uncached(
+                prompt, schema, model, is_list=is_list, system=system
+            )
+            break
+        except Exception as exc:
+            if attempt < _LLM_MAX_RETRIES and _is_rate_limit(exc):
+                time.sleep(_LLM_RETRY_BASE * (2 ** attempt))
+                continue
+            raise
 
     if len(_LLM_CACHE) < _LLM_CACHE_MAX:
         _LLM_CACHE[key] = copy.deepcopy(result)
