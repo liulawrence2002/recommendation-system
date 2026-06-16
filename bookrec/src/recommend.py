@@ -30,13 +30,17 @@ def recommend_top_n(user_id, hybrid, ratings: pd.DataFrame, books: pd.DataFrame,
     """
     seen = set(ratings.loc[ratings["user_id"] == user_id, "book_id"])
     pop = popular_books(ratings, min_ratings)
-    # Candidate universe: unseen books with enough support, optionally narrowed
-    # by UI filters before the model scores them.
-    candidates = [b for b in books["book_id"] if b not in seen and b in pop]
-    if not candidates:                          # tiny catalog / cold start fallback
-        candidates = [b for b in books["book_id"] if b not in seen]
-    if allowed_book_ids is not None:            # user filter: never re-widened below
-        candidates = [b for b in candidates if b in allowed_book_ids]
+    # Candidate universe: unseen books, narrowed by the UI filter FIRST so the
+    # popularity floor is applied within the user's selection — not the whole
+    # catalog. Applying the filter last (as before) let a narrow author/decade
+    # pick collapse to zero whenever none of its books cleared the global
+    # popularity floor, which looked like the filter "not working".
+    unseen = [b for b in books["book_id"] if b not in seen]
+    if allowed_book_ids is not None:
+        unseen = [b for b in unseen if b in allowed_book_ids]
+    candidates = [b for b in unseen if b in pop]
+    if not candidates:                          # nothing popular enough — relax
+        candidates = unseen                     # the floor rather than return []
 
     user_ratings = ratings[ratings["user_id"] == user_id]
     scores = hybrid.score(user_id, user_ratings, candidates)

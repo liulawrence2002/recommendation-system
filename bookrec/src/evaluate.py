@@ -50,6 +50,12 @@ def ranking_metrics(score_user_items, train: pd.DataFrame, test: pd.DataFrame,
     score_user_items(user_id, book_ids) -> pd.Series of scores (higher=better).
     A test book is 'relevant' if its held-out true rating >= threshold.
     We rank each user's TEST items by the model's score (class-style).
+
+    Precision@K divides hits by the number of items actually rankable for the
+    user (min(K, held-out count)), not a fixed K. The class function used a fixed
+    K denominator, which understated precision for any user with fewer than K
+    held-out items (e.g. 4 relevant of 4 scored 4/10 instead of 4/4). This is the
+    `precision_at_k_corrected.ipynb` definition. Recall and NDCG are unchanged.
     """
     test_by_user = defaultdict(list)
     for r in test.itertuples(index=False):
@@ -66,9 +72,10 @@ def ranking_metrics(score_user_items, train: pd.DataFrame, test: pd.DataFrame,
 
         n_relevant = sum(1 for _, t in items if t >= threshold)
         topk = ranked[:k]
+        n_recommended = len(topk)          # == min(k, held-out count) for the user
         n_hits = sum(1 for b in topk if true_r[b] >= threshold)
 
-        precisions.append(n_hits / k)
+        precisions.append(n_hits / n_recommended if n_recommended > 0 else 0.0)
         if n_relevant > 0:
             recalls.append(n_hits / n_relevant)
         # NDCG with binary relevance

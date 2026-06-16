@@ -59,9 +59,11 @@ st.set_page_config(
 )
 
 DEFAULT_K = 10
-DEFAULT_UBCF_K = 21
+DEFAULT_IBCF_K = 9        # winner of the corrected Top-N audit (IBCF pearson_baseline)
+DEFAULT_UBCF_K = 25       # deploy-light fallback (UBCF pearson_baseline), see build below
 DEFAULT_MIN_RATINGS = 20
 RANDOM_STATE = 6604
+BEST_SIM = "pearson_baseline"   # similarity that won the corrected audit
 
 SOURCE_REAL = "Real dataset"
 SOURCE_SAMPLE = "Synthetic sample"
@@ -2514,14 +2516,53 @@ def _split_values(series):
                 yield value
 
 
+# An author needs at least this many books in the catalog to appear in the
+# filter. With fewer titles, selecting that author leaves a candidate pool too
+# thin for the collaborative filter to rank meaningfully, so we hide them and
+# show only the well-represented (popular) authors.
+MIN_AUTHOR_BOOKS = 5
+
+# Cap the filter to this many of the most popular qualifying authors, so the
+# dropdown stays a short, recognizable shortlist rather than a long tail.
+TOP_AUTHORS = 50
+
+
 @st.cache_data
 def author_options(books):
-    """Sorted unique individual authors (comma-split), dropping blanks/Unknown."""
-    authors = {
-        a for a in _split_values(books.get("authors", pd.Series(dtype=str)))
-        if a and a != "Unknown"
-    }
-    return sorted(authors)
+    """The TOP_AUTHORS most popular authors with enough books to seed a candidate list.
+
+    Keeps authors with at least MIN_AUTHOR_BOOKS titles in the catalog, ranks
+    them by total ratings (most popular first), and returns the top TOP_AUTHORS.
+    Authors with only a handful of titles are dropped — selecting one would yield
+    a candidate pool too small to re-rank. Falls back to every named author when
+    nothing clears the threshold (e.g. the small synthetic sample).
+    """
+    if "authors" not in books.columns:
+        return []
+    exploded = books.assign(
+        _author=books["authors"].fillna("").str.split(",")
+    ).explode("_author")
+    exploded["_author"] = exploded["_author"].str.strip()
+    exploded = exploded[
+        (exploded["_author"] != "") & (exploded["_author"] != "Unknown")
+    ]
+    if exploded.empty:
+        return []
+    exploded["_rc"] = pd.to_numeric(
+        exploded.get("ratings_count", 0), errors="coerce"
+    ).fillna(0)
+    grouped = exploded.groupby("_author")
+    stats = pd.DataFrame(
+        {"n_books": grouped.size(), "popularity": grouped["_rc"].sum()}
+    )
+    popular = stats[stats["n_books"] >= MIN_AUTHOR_BOOKS]
+    if popular.empty:
+        # Threshold filtered everyone out (tiny catalog) — keep all named authors.
+        return sorted(stats.index)
+    popular = popular.sort_values(
+        ["popularity", "n_books"], ascending=[False, False]
+    )
+    return list(popular.index[:TOP_AUTHORS])
 
 
 # A decade needs at least this many books to stand alone as a filter option;
@@ -2632,13 +2673,13 @@ def filter_book_ids(books, authors=None, decades=None, genres=None):
 
 
 @st.cache_resource
-def build_model(source: str, kind: str, k: int = DEFAULT_K):
+def build_model(source: str, kind: str, k: int = DEFAULT_K, sim_name: str | None = None):
     # Model objects are heavier and mutable, so cache as resources rather than
     # serializing them through st.cache_data.
     ratings, _ = load_data(source)
     if kind == "popularity" or not HAVE_SURPRISE:
         return PopularityModel().fit(ratings)
-    return cf_model.CFModel(kind=kind, k=k).fit(ratings)
+    return cf_model.CFModel(kind=kind, k=k, sim_name=sim_name).fit(ratings)
 
 
 @st.cache_resource
@@ -2904,12 +2945,21 @@ with st.container(border=True):
     base_filters = st.container()
 
     # Model and tuning are fixed to the validated optimal configuration — no UI
-    # knobs. UBCF (pearson) won the Top-N ranking audit (best F1@10) with k tuned
-    # by CV; we fall back to the popularity model only if scikit-surprise is
-    # unavailable. The chat re-ranks these candidates on top.
+    # knobs. IBCF (item-based, pearson_baseline) won the CORRECTED Top-N audit —
+    # best F1@10 and best RMSE — with k tuned by CV (see notebooks/
+    # precision_at_k_corrected.ipynb and scripts/run_cf_bakeoff.py). We fall back
+    # to the popularity model only if scikit-surprise is unavailable. The chat
+    # re-ranks these candidates on top.
+    #
+    # Deploy note: item-based KNN builds a ~9k x 9k item-item similarity matrix
+    # (~680MB) — heavier than UBCF's tiny user-user matrix. If the host (e.g.
+    # Streamlit Community Cloud's ~1GB tier) runs out of memory, switch the two
+    # lines below to the deploy-light alternative that was statistically tied on
+    # ranking quality:  cf_kind = "ubcf";  k_neighbors = DEFAULT_UBCF_K  (k=25).
     source = SOURCE_REAL
-    cf_kind = "ubcf" if HAVE_SURPRISE else "popularity"
-    k_neighbors = DEFAULT_UBCF_K
+    cf_kind = "ibcf" if HAVE_SURPRISE else "popularity"
+    cf_sim = BEST_SIM
+    k_neighbors = DEFAULT_IBCF_K
     top_n = 10
     min_ratings = DEFAULT_MIN_RATINGS
 
@@ -2936,7 +2986,14 @@ with st.container(border=True):
                 key="reader_override",
             )
         with author_col:
-            sel_authors = st.multiselect("Authors", author_opts, key="filt_authors")
+            sel_authors = st.multiselect(
+                "Authors",
+                author_opts,
+                key="filt_authors",
+                help="The 50 most popular authors with enough books in the "
+                     "catalog to seed a candidate list, ordered by popularity. "
+                     "Type to search.",
+            )
         with decade_col:
             sel_decades = st.multiselect("Decades", decade_opts, key="filt_decades")
         # Genre stays hidden until genre data exists (genre_opts is empty today).
@@ -2969,17 +3026,15 @@ with st.container(border=True):
         )
     if sel_genres:
         filter_pills += f'<span class="pill">{len(sel_genres)} genre(s)</span>'
-    st.markdown(
-        f'<div class="pill-row">'
-        f'<span class="pill">{escape(model_label(cf_kind))}</span>'
-        f'{filter_pills}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    if filter_pills:
+        st.markdown(
+            f'<div class="pill-row">{filter_pills}</div>',
+            unsafe_allow_html=True,
+        )
 
     if st.button("Generate filtered candidates", type="primary", width="stretch"):
         with st.spinner("Scoring the catalog..."):
-            model = build_model(source, cf_kind, k=k_neighbors)
+            model = build_model(source, cf_kind, k=k_neighbors, sim_name=cf_sim)
             scorer = ScoreAdapter(model)
             st.session_state["cf_recs"] = recommend.recommend_top_n(
                 uid,

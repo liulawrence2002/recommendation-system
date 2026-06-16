@@ -38,18 +38,23 @@ def build_dataset(ratings: pd.DataFrame):
         ratings[["user_id", "book_id", "rating"]], reader)
 
 
-def make_model(kind: str = "svd", k: int = 10):
-    """Factory: 'svd', 'ubcf' (user-based, Pearson), 'ibcf' (item-based, cosine),
-    'baseline' (global + user + item means)."""
+def make_model(kind: str = "svd", k: int = 10, sim_name: str | None = None):
+    """Factory: 'svd', 'ubcf' (user-based), 'ibcf' (item-based),
+    'baseline' (global + user + item means).
+
+    sim_name overrides the KNN similarity for ubcf/ibcf (e.g. "pearson_baseline").
+    When None the historical defaults apply: ubcf -> pearson, ibcf -> cosine.
+    The corrected Top-N audit picks ibcf with "pearson_baseline" (see app.py).
+    """
     surprise = _require_surprise()
     if kind == "svd":
         return surprise.SVD(n_factors=50, n_epochs=20, random_state=6604)
     if kind == "ubcf":
-        return surprise.KNNBasic(k=k, sim_options={"name": "pearson", "user_based": True},
-                                 verbose=False)
+        sim = {"name": sim_name or "pearson", "user_based": True}
+        return surprise.KNNBasic(k=k, sim_options=sim, verbose=False)
     if kind == "ibcf":
-        return surprise.KNNBasic(k=k, sim_options={"name": "cosine", "user_based": False},
-                                 verbose=False)
+        sim = {"name": sim_name or "cosine", "user_based": False}
+        return surprise.KNNBasic(k=k, sim_options=sim, verbose=False)
     if kind == "baseline":
         return surprise.BaselineOnly(verbose=False)
     raise ValueError(f"unknown kind: {kind!r}")
@@ -89,10 +94,11 @@ class PopularityModel:
 class CFModel:
     """Uniform wrapper: train, then .predict(user, book) -> estimated rating."""
 
-    def __init__(self, kind: str = "svd", k: int = 10):
+    def __init__(self, kind: str = "svd", k: int = 10, sim_name: str | None = None):
         self.kind = kind
         self.k = k
-        self.algo = make_model(kind, k)
+        self.sim_name = sim_name
+        self.algo = make_model(kind, k, sim_name)
         self._global_mean = 3.5
 
     def fit(self, ratings: pd.DataFrame, trainset=None):
