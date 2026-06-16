@@ -59,8 +59,8 @@ st.set_page_config(
 )
 
 DEFAULT_K = 10
-DEFAULT_IBCF_K = 9        # winner of the corrected Top-N audit (IBCF pearson_baseline)
-DEFAULT_UBCF_K = 25       # deploy-light fallback (UBCF pearson_baseline), see build below
+DEFAULT_UBCF_K = 25       # SHIPPED: best memory-light model (UBCF pearson_baseline)
+DEFAULT_IBCF_K = 9        # absolute-best metrics but ~815MB peak — needs more RAM than free tier
 DEFAULT_MIN_RATINGS = 20
 RANDOM_STATE = 6604
 BEST_SIM = "pearson_baseline"   # similarity that won the corrected audit
@@ -2945,21 +2945,24 @@ with st.container(border=True):
     base_filters = st.container()
 
     # Model and tuning are fixed to the validated optimal configuration — no UI
-    # knobs. IBCF (item-based, pearson_baseline) won the CORRECTED Top-N audit —
-    # best F1@10 and best RMSE — with k tuned by CV (see notebooks/
-    # precision_at_k_corrected.ipynb and scripts/run_cf_bakeoff.py). We fall back
-    # to the popularity model only if scikit-surprise is unavailable. The chat
-    # re-ranks these candidates on top.
+    # knobs. We ship UBCF (user-based, pearson_baseline, k=25): the best
+    # MEMORY-LIGHT model in the corrected Top-N audit and the top user-based
+    # config on the held-out test (Precision@10 0.6953 / F1 0.745; see
+    # notebooks/precision_at_k_corrected.ipynb cell 46 and scripts/run_cf_bakeoff.py).
+    # We fall back to the popularity model only if scikit-surprise is unavailable.
+    # The chat re-ranks these candidates on top.
     #
-    # Deploy note: item-based KNN builds a ~9k x 9k item-item similarity matrix
-    # (~680MB) — heavier than UBCF's tiny user-user matrix. If the host (e.g.
-    # Streamlit Community Cloud's ~1GB tier) runs out of memory, switch the two
-    # lines below to the deploy-light alternative that was statistically tied on
-    # ranking quality:  cf_kind = "ubcf";  k_neighbors = DEFAULT_UBCF_K  (k=25).
+    # Why not IBCF: item-based pearson_baseline scored marginally higher offline
+    # (F1 0.746, best RMSE) but builds a ~9k x 9k item-item similarity matrix —
+    # measured ~815MB peak RSS vs ~177MB for this UBCF config — which OOM-kills
+    # Streamlit Community Cloud's free tier on the first candidate build. The
+    # ranking-quality gap is ~0.001 F1 (imperceptible to the top-N the app shows).
+    # If you deploy on a host with more RAM and want the absolute-best metrics,
+    # switch the two lines below to:  cf_kind = "ibcf";  k_neighbors = DEFAULT_IBCF_K (9).
     source = SOURCE_REAL
-    cf_kind = "ibcf" if HAVE_SURPRISE else "popularity"
+    cf_kind = "ubcf" if HAVE_SURPRISE else "popularity"
     cf_sim = BEST_SIM
-    k_neighbors = DEFAULT_IBCF_K
+    k_neighbors = DEFAULT_UBCF_K
     top_n = 10
     min_ratings = DEFAULT_MIN_RATINGS
 
