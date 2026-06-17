@@ -5,8 +5,8 @@ Run from this folder so imports and data paths resolve:
     cd bookrec
     streamlit run app.py
 
-The API key is read from the environment (GEMINI_API_KEY). Without a key the
-app uses a transparent heuristic re-ranker so it always runs.
+The API key is read from the environment (GEMINI_API_KEY). The chat re-ranker is
+LLM-only (Gemini) — without a key the chat is disabled and shows a clear notice.
 """
 from __future__ import annotations
 
@@ -19,9 +19,1218 @@ import sys
 import urllib.parse
 import warnings
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+
+# ======================================================================
+# Inlined source (formerly bookrec/src/*). Kept in src/ too for the
+# archived analysis code; this copy makes app.py runnable standalone.
+# ======================================================================
+
+# ===== inlined from src/data_loader.py =====
+import os
+import pandas as pd
+
+
+## fix coding , part of preprossing and cleaning the data for use in the pipeline (helper function)
+def _fix_mojibake(s):
+    """Repair UTF-8 text mis-decoded as latin-1 (e.g. 'GrandPrÃ©' -> 'GrandPré')."""
+    if not isinstance(s, str):
+        return s
+    try:
+        return s.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+
+def load(data_dir: str = "data", fix_encoding: bool = True):
+    """Primary loader: read the assignment Books.csv + Ratings.csv.
+
+    Reproducible from just those two files. There is no shelf-tags file in this
+    dataset, so an empty `tags` column is added and the content model falls back
+    to title + authors. Returns (ratings, books) in the package contract.
+    """
+    def _path(name):
+        p = os.path.join(data_dir, name)
+        if not os.path.exists(p):
+            raise FileNotFoundError(
+                f"Could not find {name} in {data_dir!r}. "
+                f"Place Books.csv and Ratings.csv there (see bookrec/data/README.md)."
+            )
+        return p
+
+    books = pd.read_csv(_path("Books.csv"))
+    ratings = pd.read_csv(_path("Ratings.csv"))
+
+    if fix_encoding:
+        for col in ("authors", "title"):
+            if col in books.columns:
+                # The assignment CSV has a few UTF-8 strings that were decoded
+                # as latin-1; repair display text before any UI/model use.
+                books[col] = books[col].map(_fix_mojibake)
+
+    books["tags"] = ""                       # no shelf tags in this dataset
+
+    books = _coerce_books(books)
+    ratings = ratings[["user_id", "book_id", "rating"]].copy()
+    ratings["rating"] = ratings["rating"].astype(float)
+    return ratings, books
+
+
+def _coerce_books(books: pd.DataFrame) -> pd.DataFrame:
+    """Ensure all contract columns exist with safe defaults."""
+    defaults = {
+        "title": "Untitled", "authors": "Unknown",
+        "original_publication_year": 0, "average_rating": 0.0,
+        "ratings_count": 0, "tags": "",
+    }
+    for col, val in defaults.items():
+        # Downstream modules select these columns unconditionally, so create
+        # absent optional fields before filling missing values.
+        if col not in books.columns:
+            books[col] = val
+        books[col] = books[col].fillna(val)
+    return books
+
+
+# ===== inlined from src/cf_model.py =====
+import pandas as pd
+
+RATING_SCALE = (1.0, 5.0)   # this dataset uses 1..5 stars
+
+
+def _require_surprise():
+    # Import Surprise lazily so the module stays importable on machines without
+    # the compiled wheel; the app's filtering block stops with a clear message
+    # if it's missing (collaborative filtering requires it).
+    try:
+        import surprise  # noqa: F401
+        return surprise
+    except Exception as e:  # pragma: no cover
+        raise ImportError(
+            "scikit-surprise is needed for collaborative filtering.\n"
+            "  pip install 'numpy<2.0' && pip install scikit-surprise\n"
+            "  (or: conda install -c conda-forge scikit-surprise)\n"
+            f"original error: {e}"
+        )
+
+
+def build_dataset(ratings: pd.DataFrame):
+    """Wrap a [user_id, book_id, rating] frame as a Surprise Dataset."""
+    surprise = _require_surprise()
+    reader = surprise.Reader(rating_scale=RATING_SCALE)
+    return surprise.Dataset.load_from_df(
+        ratings[["user_id", "book_id", "rating"]], reader)
+
+
+def make_model(kind: str = "ubcf", k: int = 10, sim_name: str | None = None):
+    """Factory: 'ubcf' (user-based KNN) or 'ibcf' (item-based KNN).
+
+    sim_name overrides the KNN similarity (e.g. "pearson_baseline"). When None
+    the defaults apply: ubcf -> pearson, ibcf -> cosine. The corrected Top-N
+    audit picks pearson_baseline; the app ships UBCF and documents IBCF as the
+    higher-RAM swap (see the model-selection block below).
+    """
+    surprise = _require_surprise()
+    if kind == "ubcf":
+        sim = {"name": sim_name or "pearson", "user_based": True}
+        return surprise.KNNBasic(k=k, sim_options=sim, verbose=False)
+    if kind == "ibcf":
+        sim = {"name": sim_name or "cosine", "user_based": False}
+        return surprise.KNNBasic(k=k, sim_options=sim, verbose=False)
+    raise ValueError(f"unknown kind: {kind!r} (only 'ubcf' and 'ibcf' are supported)")
+
+
+class CFModel:
+    """Uniform wrapper: train, then .predict(user, book) -> estimated rating."""
+
+    def __init__(self, kind: str = "ubcf", k: int = 10, sim_name: str | None = None):
+        self.kind = kind
+        self.k = k
+        self.sim_name = sim_name
+        self.algo = make_model(kind, k, sim_name)
+        self._global_mean = 3.5
+
+    def fit(self, ratings: pd.DataFrame, trainset=None):
+        if trainset is None:
+            trainset = build_dataset(ratings).build_full_trainset()
+        # Accepting an external trainset lets evaluation notebooks reuse the
+        # exact same split instead of silently rebuilding on all ratings.
+        self.algo.fit(trainset)
+        self._global_mean = trainset.global_mean
+        return self
+
+    def predict(self, user_id, book_id) -> float:
+        return self.algo.predict(user_id, book_id).est
+
+    def predict_for_user(self, user_id, book_ids) -> pd.Series:
+        est = [self.predict(user_id, b) for b in book_ids]
+        return pd.Series(est, index=list(book_ids), name="cf_score")
+
+
+# ===== inlined from src/content_model.py =====
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import normalize
+
+
+def _content_document(books: pd.DataFrame) -> pd.Series:
+    """One text blob per book. Repeat tags so shelves dominate the signal."""
+    title = books["title"].fillna("").astype(str)
+    authors = books["authors"].fillna("").astype(str)
+    tags = books["tags"].fillna("").astype(str)
+    return title + " " + authors + " " + tags + " " + tags  # tags weighted x2
+
+
+class ContentModel:
+    """TF-IDF content vectors over book metadata, used only to ground the
+    re-ranker's explanations (candidate -> the reader's most similar favorite)."""
+
+    def __init__(self):
+        self.books = None
+        self.item_vectors = None          # [n_books, d], L2-normalized
+        self._row_of = {}                 # book_id -> row index
+
+    def fit(self, books: pd.DataFrame):
+        self.books = books.reset_index(drop=True)
+        # Row lookup keeps similarity code fast and avoids repeated DataFrame
+        # filtering when scoring thousands of candidate ids.
+        self._row_of = {bid: i for i, bid in enumerate(self.books["book_id"])}
+        docs = _content_document(self.books)
+        # Unigrams + bigrams capture titles/authors and common shelf phrases
+        # while staying lightweight enough for Streamlit startup.
+        self.vectorizer = TfidfVectorizer(
+            ngram_range=(1, 2), min_df=1, max_df=0.9,
+            stop_words="english", sublinear_tf=True)
+        X = self.vectorizer.fit_transform(docs)        # sparse, already L2-normalized
+        self.item_vectors = normalize(X)               # be explicit
+        return self
+
+
+    # --- grounding: candidate -> the user's own favorite it most resembles --
+    def nearest_examples(self, candidate_ids, liked_ids):
+        """For each candidate, the single most content-similar book among the
+        user's ``liked_ids`` (books they rated highly).
+
+        Returns ``{candidate_id: (liked_book_id, similarity)}``, skipping any
+        candidate with no positive match. Used to *ground* the LLM re-ranker's
+        explanations in the reader's real history ("in the spirit of X, which you
+        rated highly") instead of letting the model guess from the title alone.
+        """
+        out = {}
+        liked = [(b, self._row_of[b]) for b in liked_ids if b in self._row_of]
+        if not liked or self.item_vectors is None:
+            return out
+        lids, lidx = zip(*liked)
+        L = self.item_vectors[list(lidx)]
+        for b in candidate_ids:
+            r = self._row_of.get(b)
+            if r is None:
+                continue
+            v = self.item_vectors[r]
+            sims = L @ (v.T if hasattr(v, "T") else v)
+            sims = (np.asarray(sims.todense()).ravel()
+                    if hasattr(sims, "todense") else np.asarray(sims).ravel())
+            order = np.argsort(-sims)
+            for j in order:                      # take the best match that isn't itself
+                if lids[j] != b and sims[j] > 0:
+                    out[b] = (lids[j], float(sims[j]))
+                    break
+        return out
+
+
+# ===== inlined from src/llm_rerank.py =====
+import json
+import os
+import re
+import time
+from dataclasses import dataclass
+from enum import Enum
+
+try:  # Pydantic ships as a dependency of the google-genai SDK.
+    from pydantic import BaseModel, Field
+    _HAVE_PYDANTIC = True
+except Exception:  # keep the module importable even without pydantic installed
+    _HAVE_PYDANTIC = False
+
+# Provider/model for the LLM layer. gemini-2.5-flash-lite is the model used in
+# the Week-4 class exercise — fast, free-tier friendly, and it supports the
+# structured-output mode (response_schema) we rely on to force valid JSON instead
+# of regex-parsing free text. Cite this pair in the deck:
+#     provider = "Google", model = DEFAULT_MODEL
+DEFAULT_MODEL = "gemini-2.5-flash-lite"
+
+# Persona + house style passed as the Week-4 `system_instruction` on the
+# explanation stages. Giving the model a consistent voice plus an explicit
+# "be specific to each book, never repeat yourself" rule is what turns one
+# generic reason repeated down the list into a distinct, grounded "why" per pick.
+PERSONA = ( "You are BookRec, a careful reader-advisory librarian embedded inside a " 
+           "collaborative-filtering book recommender. Your role is to personalize and "
+            "re-rank ONLY the candidate books already produced by the recommendation model; "
+              "you must never invent, replace, or add books outside the provided candidate list. "
+                "Use the available evidence for each candidate — title, author, publication year, " 
+                "average rating, collaborative-filtering score, similarity to books the reader "
+                  "already liked, relevance notes, and avoid-flags — to decide the final order. " 
+                  "Prioritize the reader's stated mood, genre, pace, themes, recency preference, "
+                    "and any things they asked to avoid. If a book conflicts with an avoid preference, "
+                      "demote it unless there is a clear reason to keep it. Write explanations that are " 
+                      "specific to each individual book and grounded in the provided metadata or known " 
+                      "context; do not fabricate plot details, themes, or genres when the metadata does "
+                        "not support them. If the available metadata is limited, explain the fit using the "
+                          "author, era, rating, CF score, or similarity to the reader's favorites. Every "
+                            "explanation should be one natural sentence, friendly and concrete, with no repeated "
+                              "phrasing across the list. Sound like a smart librarian helping a reader, not a "
+                                "marketing blurb or a generic AI assistant." )
+
+
+@dataclass
+class RerankedPick:
+    book_id: int
+    title: str
+    authors: str
+    explanation: str          # WHY this book earned its rank — ties to the reader intent
+    description: str = ""      # ONE neutral sentence describing what the book IS / is about
+
+# Passing a Pydantic model as Gemini's `response_schema` makes the API return
+# JSON that already matches this shape (response.parsed is typed), so we drop the
+# brittle regex parsing. This is the exact technique from the Week-4 exercise.
+if _HAVE_PYDANTIC:
+    class RerankItem(BaseModel):
+        book_id: int = Field(description="A book_id taken ONLY from the candidate list.")
+        description: str = Field(description="One neutral sentence on what the book is about.")
+        explanation: str = Field(description="One sentence on why it earns this rank.")
+
+    RERANK_LIST_SCHEMA = list[RerankItem]
+else:  # no pydantic -> structured output is unavailable; callers use the text path
+    RerankItem = None
+    RERANK_LIST_SCHEMA = None
+
+
+def _candidate_table(candidates):
+    """candidates: list of dicts with book_id, title, authors, year, average_rating,
+    cf_score, and optionally similar_to (a book the reader already rated highly).
+    Returns a compact, numbered context string for the prompt."""
+    lines = []
+    for c in candidates:
+        line = (
+            f"[{c['book_id']}] \"{c['title']}\" by {c.get('authors','?')} "
+            f"({c.get('year','?')}), avg_rating={c.get('average_rating','?')}, "
+            f"cf_score={c.get('cf_score','?')}"
+        )
+        if c.get("similar_to"):
+            line += f', similar_to_reader_favorite="{c["similar_to"]}"'
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _synth_description(c) -> str:
+    """Synthesize a neutral one-sentence book description from the metadata we
+    have (author, year, average_rating). Used when no synopsis/genre text exists
+    and as the offline fallback. Never crashes on missing/"?" values."""
+    title = str(c.get("title", "") or "this book").strip()
+    authors = str(c.get("authors", "") or "").strip()
+    year = c.get("year", "?")
+    avg = c.get("average_rating", "?")
+
+    parts = [f"“{title}”"]
+    if authors and authors != "?":
+        parts.append(f"by {authors}")
+    # only mention the year if it looks like a real value
+    if year not in (None, "", "?") and str(year).strip() not in ("", "?"):
+        parts.append(f"published in {year}")
+    sentence = " ".join(parts)
+    # close with a rating clause when available, otherwise a neutral fallback
+    if avg not in (None, "", "?") and str(avg).strip() not in ("", "?"):
+        sentence += f", a reader-rated book averaging {avg}/5."
+    else:
+        sentence += ", a book from this collection."
+    return sentence
+
+
+def _have_new_sdk() -> bool:
+    """The Week-4 google-genai SDK (preferred — supports response_schema)."""
+    try:
+        from google import genai  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _have_old_sdk() -> bool:
+    """The legacy google-generativeai SDK (text-only fallback)."""
+    try:
+        import google.generativeai  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _sdk_available() -> bool:
+    return _have_new_sdk() or _have_old_sdk()
+
+
+def _call_gemini(prompt: str, model: str) -> str:
+    """Legacy text call (old google-generativeai SDK). Used only as a fallback
+    when the new google-genai SDK isn't installed; structured output is preferred."""
+    import google.generativeai as genai
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    resp = genai.GenerativeModel(model).generate_content(prompt)
+    return resp.text
+
+
+def _to_plain(parsed):
+    """Convert google-genai `.parsed` (Pydantic models / enums / lists thereof)
+    into the plain dict / list-of-dicts shape every stage parser already expects."""
+    if parsed is None:
+        return None
+    if isinstance(parsed, list):
+        return [_to_plain(x) for x in parsed]
+    if isinstance(parsed, Enum):
+        return parsed.value
+    if hasattr(parsed, "model_dump"):
+        return parsed.model_dump()
+    return parsed
+
+
+# Small in-memory cache of structured LLM responses. Each chat turn fires up to
+# three Gemini calls (intent -> score -> re-rank); identical prompts (e.g. the
+# user re-sends a suggestion chip, or Streamlit replays a turn) return instantly
+# instead of re-billing the API. Keyed by the full prompt + model + system + schema
+# so different inputs never collide; values are deep-copied in and out so callers
+# can't mutate the cache. This directly mitigates the cost/latency + rate-limit
+# (HTTP 429) challenges called out in the business write-up.
+_LLM_CACHE: dict = {}
+_LLM_CACHE_MAX = 256
+
+# The free tier's per-minute (RPM) burst limit clears in a second or two, so we
+# retry a rate-limited call a couple of times with exponential backoff before
+# giving up. On a genuinely exhausted quota (or other hard error) the call raises
+# and the chat turn surfaces an "AI temporarily unavailable" message.
+_LLM_MAX_RETRIES = 2
+_LLM_RETRY_BASE = 1.0  # seconds; backoff is _LLM_RETRY_BASE * 2**attempt -> ~1s, 2s
+
+
+def _is_rate_limit(exc) -> bool:
+    """True if an exception looks like a Gemini 429 / quota error. Robust across
+    SDK versions: checks the structured status code and the message text."""
+    if getattr(exc, "code", None) == 429:
+        return True
+    text = str(exc).lower()
+    return any(s in text for s in ("429", "resource_exhausted", "rate limit", "quota"))
+
+
+def _cache_key(prompt: str, schema, model: str, system: str | None):
+    schema_name = getattr(schema, "__name__", None) or repr(schema)
+    return (model, schema_name, system or "", prompt)
+
+
+def _structured(prompt: str, schema, model: str = DEFAULT_MODEL, *,
+                is_list: bool = False, system: str | None = None):
+    """Preferred LLM path — Week-4 structured output.
+
+    Returns plain Python (dict for an object schema, list[dict] for a list
+    schema, str for an Enum) so existing ``.get(...)`` parsing keeps working
+    unchanged. Prefers the new google-genai SDK with ``response_schema``; if only
+    the legacy SDK is present (or pydantic is missing), falls back to a text call
+    plus a tolerant regex parse. Results are cached in-process (see ``_LLM_CACHE``).
+    Raises on hard failure so the chat turn can surface an error to the reader.
+    """
+    import copy
+
+    key = _cache_key(prompt, schema, model, system)
+    if key in _LLM_CACHE:
+        return copy.deepcopy(_LLM_CACHE[key])
+
+    for attempt in range(_LLM_MAX_RETRIES + 1):
+        try:
+            result = _structured_uncached(
+                prompt, schema, model, is_list=is_list, system=system
+            )
+            break
+        except Exception as exc:
+            if attempt < _LLM_MAX_RETRIES and _is_rate_limit(exc):
+                time.sleep(_LLM_RETRY_BASE * (2 ** attempt))
+                continue
+            raise
+
+    if len(_LLM_CACHE) < _LLM_CACHE_MAX:
+        _LLM_CACHE[key] = copy.deepcopy(result)
+    return result
+
+
+def _structured_uncached(prompt: str, schema, model: str = DEFAULT_MODEL, *,
+                         is_list: bool = False, system: str | None = None):
+    if schema is not None and _have_new_sdk():
+        from google import genai
+        client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        is_enum = isinstance(schema, type) and issubclass(schema, Enum)
+        config = {
+            "response_mime_type": "text/x.enum" if is_enum else "application/json",
+            "response_schema": schema,
+        }
+        if system:
+            config["system_instruction"] = system
+        resp = client.models.generate_content(model=model, contents=prompt, config=config)
+        plain = _to_plain(resp.parsed)
+        if plain is None or (is_list and not plain):
+            raise ValueError("empty structured response")
+        return plain
+
+    # Fallback: legacy SDK text + tolerant regex parse.
+    raw = _call_gemini(prompt, model)
+    if is_list:
+        return _parse_json_list(raw)
+    if isinstance(schema, type) and issubclass(schema, Enum):
+        return raw.strip()
+    m = re.search(r"\{.*\}", raw, re.S)
+    if not m:
+        raise ValueError("no JSON object in response")
+    return json.loads(m.group(0))
+
+
+def _parse_json_list(text: str):
+    """Pull the first JSON array out of the model's reply (legacy text path)."""
+    m = re.search(r"\[.*\]", text, re.S)
+    if not m:
+        return []
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+
+
+def candidates_from_recs(recs_df, books):
+    """Helper: turn a recommend_top_n() DataFrame into the candidate dicts this
+    module expects, pulling metadata from the books frame."""
+    meta = books.set_index("book_id")
+    out = []
+    for r in recs_df.itertuples(index=False):
+        # Start with placeholders because many CSV fields are optional or NaN.
+        year, avg = "?", "?"
+        if r.book_id in meta.index:
+            row = meta.loc[r.book_id]
+            y = row.get("original_publication_year", None)
+            if y is not None and y == y:  # not NaN
+                year = int(float(y))
+            a = row.get("average_rating", None)
+            if a is not None and a == a:
+                avg = round(float(a), 2)
+        out.append({
+            "book_id": r.book_id,
+            "title": getattr(r, "title", ""),
+            "authors": getattr(r, "authors", ""),
+            "year": year,
+            "average_rating": avg,
+            "cf_score": round(float(getattr(r, "score", 0.0)), 3),
+        })
+    return out
+
+
+# rag_pipeline referenced its sibling as ``llm_rerank.<fn>``; both are inlined
+# into this file now, so point that name at this module to keep those calls
+# resolving (covers conditionally-defined names like RERANK_LIST_SCHEMA too).
+llm_rerank = sys.modules[__name__]
+
+
+# ===== inlined from src/rag_pipeline.py =====
+import json
+import os
+import re
+from dataclasses import dataclass, field
+
+
+# --- Week-4 structured-output schemas for each DAG stage -----------------------
+# Each LLM stage forces Gemini to return JSON matching one of these schemas
+# (response.parsed is typed), instead of parsing free text. `pace` and `recency`
+# use Enum fields — the Week-4 "enum mode" technique applied to constrained
+# facets, so the model can only emit a value the downstream scorer understands.
+if llm_rerank._HAVE_PYDANTIC:
+    from enum import Enum
+
+    from pydantic import BaseModel, Field
+
+    class _Pace(str, Enum):
+        FAST = "fast"
+        SLOW = "slow"
+        ANY = "any"
+
+    class _Recency(str, Enum):
+        RECENT = "recent"
+        CLASSIC = "classic"
+        ANY = "any"
+
+    class IntentSchema(BaseModel):
+        mood: str = Field(description="One-word mood, or empty string if unclear.")
+        genres: list[str] = Field(description="Genres the reader wants.")
+        themes: list[str] = Field(description="Topics/themes the reader wants.")
+        pace: _Pace = Field(description="Desired pacing.")
+        avoid: list[str] = Field(description="Things to steer away from.")
+        recency: _Recency = Field(description="Preferred era.")
+        summary: str = Field(description="One sentence restating the whole request.")
+
+    class ScoreItem(BaseModel):
+        book_id: int = Field(description="A book_id taken ONLY from the candidate list.")
+        relevance: float = Field(description="Match score in [0,1].")
+        reason: str = Field(description="One clause tying the book to the intent.")
+        flags: list[str] = Field(description='intent.avoid hits, e.g. "avoid:romance".')
+
+    class ClarifySchema(BaseModel):
+        question: str = Field(description="One short, friendly clarifying question.")
+        options: list[str] = Field(description="3-4 concise tap-to-answer options.")
+
+    SCORE_LIST_SCHEMA = list[ScoreItem]
+else:  # no pydantic -> stages fall back to the legacy text + regex path
+    IntentSchema = ScoreItem = ClarifySchema = None
+    SCORE_LIST_SCHEMA = None
+
+# --- dataclasses ---------------------------------------------------------------
+
+@dataclass
+class Intent:
+    """Stage A output: a structured reading of the whole conversation."""
+
+    mood: str = ""
+    genres: list = field(default_factory=list)
+    themes: list = field(default_factory=list)
+    pace: str = "any"          # "fast" | "slow" | "any"
+    avoid: list = field(default_factory=list)
+    recency: str = "any"       # "recent" | "classic" | "any"
+    summary: str = ""          # one-line restatement of the whole thread
+
+
+@dataclass
+class ScoredCandidate:
+    """Stage B output: one relevance judgement per candidate book."""
+
+    book_id: int
+    relevance: float = 0.0     # 0..1
+    reason: str = ""
+    flags: list = field(default_factory=list)   # e.g. ["avoid:romance"]
+
+
+@dataclass
+class ClarifyingQuestion:
+    """Clarify-gate output: a question to ask before ranking a vague request."""
+
+    prompt: str = ""           # the question text shown to the reader
+    options: list = field(default_factory=list)   # 3-4 short quick-reply strings
+    reason: str = ""           # why we're asking (surfaced in the trace)
+
+
+@dataclass
+class StageTrace:
+    """A single DAG node, surfaced in the UI reasoning trace."""
+
+    name: str                  # "Intent" | "Clarify" | "Scoring" | "Re-rank"
+    used_llm: bool
+    output: dict               # JSON-safe summary of the stage payload
+    note: str = ""
+
+
+@dataclass
+class PipelineResult:
+    picks: list                # list[RerankedPick], final ordered shortlist
+    intent: Intent
+    scored: list               # list[ScoredCandidate]
+    used_llm: bool             # True if ANY stage used the live LLM
+    trace: list                # list[StageTrace] in DAG order
+    source: str                # display label, mirrors llm_rerank convention
+    question: object = None    # ClarifyingQuestion when the DAG paused to ask;
+    #                            None when it ran through to picks
+
+
+# --- shared helpers ------------------------------------------------------------
+
+def _describe_book(c) -> str:
+    """Synthesize a neutral one-sentence description of a candidate book from its
+    metadata (title/authors/year/average_rating). There is no synopsis/genre text
+    in the candidate dicts, so this is what feeds the description in the fallback
+    path and backfills any blank description from the live LLM. Delegates to
+    ``llm_rerank._synth_description`` so both modules describe books identically;
+    never crashes on missing/"?" values."""
+    return llm_rerank._synth_description(c or {})
+
+
+def _compose_summary(user_turns) -> str:
+    """Fold the conversation into one preference string.
+
+    The first turn is the base request; later turns are refinements applied in
+    order (newest last). Ported from the app's old ``compose_preference`` so the
+    summary stays conversation-aware even when Stage A falls back.
+    """
+    turns = [t.strip() for t in user_turns if t and t.strip()]
+    if not turns:
+        return ""
+    base = turns[0]
+    if len(turns) == 1:
+        return base
+    refinements = "; ".join(turns[1:])
+    return (
+        f"{base}. The reader then refined the request (apply in order, newest "
+        f"last): {refinements}. Keep the original intent but prioritize the most "
+        f"recent refinement."
+    )
+
+
+def _as_str_list(value) -> list:
+    """Coerce a model-supplied field into a clean list of short strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    out = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return out
+
+
+# --- Stage A: intent extraction ------------------------------------------------
+
+def _intent_prompt(user_turns) -> str:
+    base = user_turns[0].strip()
+    refinements = [t.strip() for t in user_turns[1:] if t.strip()]
+    refine_block = (
+        "\n".join(f"  - {r}" for r in refinements) if refinements else "  (none yet)"
+    )
+    return (
+        "You are the intent-extraction stage of a book recommendation pipeline. "
+        "Read the reader's conversation and distill it into structured preferences. "
+        "Refinements are applied in order; the MOST RECENT refinement wins on "
+        "conflicts, but keep the original intent otherwise.\n\n"
+        f'Base request: "{base}"\n'
+        f"Refinements (oldest first):\n{refine_block}\n\n"
+        "Respond with STRICT JSON, exactly this shape and nothing else:\n"
+        '{"mood": "<one word or empty>", '
+        '"genres": ["..."], "themes": ["..."], '
+        '"pace": "fast|slow|any", '
+        '"avoid": ["things to steer away from"], '
+        '"recency": "recent|classic|any", '
+        '"summary": "<one sentence restating the full request>"}'
+    )
+
+
+def extract_intent(user_turns, *, model: str = DEFAULT_MODEL):
+    """Stage A (LLM-only). Returns ``(Intent, True)``. Raises if the LLM call fails."""
+    turns = [t for t in user_turns if t and t.strip()]
+    if not turns:
+        return Intent(), True
+
+    data = llm_rerank._structured(_intent_prompt(turns), IntentSchema, model) or {}
+
+    summary = str(data.get("summary", "")).strip() or _compose_summary(turns)
+    intent = Intent(
+        mood=str(data.get("mood", "")).strip(),
+        genres=_as_str_list(data.get("genres")),
+        themes=_as_str_list(data.get("themes")),
+        pace=(str(data.get("pace", "any")).strip().lower() or "any"),
+        avoid=_as_str_list(data.get("avoid")),
+        recency=(str(data.get("recency", "any")).strip().lower() or "any"),
+        summary=summary,
+    )
+    return intent, True
+
+
+# --- Clarify gate: ask before ranking when the request is too vague ------------
+
+# Below this many distinct intent signals, the request is "thin" and the gate
+# asks one clarifying question instead of ranking. Tunable in one place.
+CLARIFY_MIN_SIGNALS = 2
+MAX_CLARIFY_ROUNDS = 2
+
+
+def _intent_specificity(intent: Intent) -> int:
+    """Count the distinct, meaningful signals the reader has given us so far.
+
+    Only the structured Intent facets are inspected — the same fields the
+    downstream scorer relies on — so the gate's view matches what ranking can
+    actually use.
+    """
+    score = 0
+    if intent.mood:
+        score += 1
+    score += len(intent.genres)
+    if intent.pace and intent.pace != "any":
+        score += 1
+    if intent.recency and intent.recency != "any":
+        score += 1
+    # Themes are weak signals — the offline fallback fills them with leftover
+    # tokens ("good", "recommend"), so a noisy list shouldn't read as specific.
+    # Count their presence as at most one signal.
+    score += min(len(intent.themes), 1)
+    return score
+
+
+def needs_clarification(intent: Intent, rounds_asked: int,
+                        max_rounds: int = MAX_CLARIFY_ROUNDS) -> bool:
+    """True when the request is too thin to rank well AND we still have a
+    clarifying round left. After ``max_rounds`` we always proceed to ranking."""
+    if rounds_asked >= max_rounds:
+        return False
+    return _intent_specificity(intent) < CLARIFY_MIN_SIGNALS
+
+
+def _clarify_prompt(intent: Intent) -> str:
+    return (
+        "You are the clarifying-question stage of a book recommendation pipeline. "
+        "The reader's request so far is too vague to rank confidently. Ask ONE "
+        "short, friendly question that would most improve the recommendations, and "
+        "offer 3-4 concise tap-to-answer options.\n\n"
+        f'Reader summary: "{intent.summary}"\n'
+        f"Structured intent so far: {_intent_block(intent)}\n\n"
+        "Ask about the single most useful MISSING facet (genre, tone/mood, pace, or "
+        "recency). Keep options to a few words each.\n"
+        "Respond with STRICT JSON, exactly this shape and nothing else:\n"
+        '{"question": "<one short question>", '
+        '"options": ["<opt>", "<opt>", "<opt>"]}'
+    )
+
+
+def build_clarifying_question(intent: Intent, *, model: str = DEFAULT_MODEL):
+    """Clarify gate (LLM-only). Returns ``(ClarifyingQuestion, True)``. Raises on LLM failure."""
+    data = llm_rerank._structured(_clarify_prompt(intent), ClarifySchema, model) or {}
+    prompt = str(data.get("question", "")).strip()
+    options = _as_str_list(data.get("options"))
+    if not prompt or not options:
+        raise RuntimeError("clarify stage returned no usable question")
+    return (
+        ClarifyingQuestion(
+            prompt=prompt,
+            options=options[:4],
+            reason="live LLM gate: request was too vague to rank",
+        ),
+        True,
+    )
+
+
+# --- Stage B: candidate scoring ------------------------------------------------
+
+def _intent_block(intent: Intent) -> str:
+    return json.dumps(
+        {
+            "mood": intent.mood,
+            "genres": intent.genres,
+            "themes": intent.themes,
+            "pace": intent.pace,
+            "avoid": intent.avoid,
+            "recency": intent.recency,
+        },
+        ensure_ascii=False,
+    )
+
+
+def _score_prompt(candidates, intent: Intent) -> str:
+    table = llm_rerank._candidate_table(candidates)
+    ids = [c["book_id"] for c in candidates]
+    return (
+        "You are the candidate-scoring stage of a book recommendation pipeline. "
+        "Score how well EACH candidate matches the reader's structured intent. "
+        "Do not drop candidates and do not invent books.\n\n"
+        f'Reader summary: "{intent.summary}"\n'
+        f"Structured intent: {_intent_block(intent)}\n\n"
+        f"Candidates (choose ONLY from these book_ids: {ids}):\n{table}\n\n"
+        "Some candidates list similar_to_reader_favorite — a book this reader "
+        "already rated highly; treat that as a strong positive signal and you may "
+        "cite it in the reason.\n"
+        "For every candidate, return a relevance score in [0,1], a one-clause "
+        "reason tied to the intent, and a list of flags for any intent.avoid "
+        'terms it triggers (e.g. "avoid:romance"; empty list if none).\n'
+        "Respond with STRICT JSON: a list of objects "
+        '{"book_id": <int>, "relevance": <float 0..1>, "reason": "<str>", '
+        '"flags": ["..."]} and nothing else.'
+    )
+
+
+def score_candidates(candidates, intent: Intent, *, model: str = DEFAULT_MODEL):
+    """Stage B (LLM-only). Returns ``(list[ScoredCandidate], True)``. Raises on LLM failure."""
+    if not candidates:
+        return [], True
+
+    by_id = {c["book_id"]: c for c in candidates}
+
+    parsed = llm_rerank._structured(
+        _score_prompt(candidates, intent), SCORE_LIST_SCHEMA, model,
+        is_list=True, system=llm_rerank.PERSONA,
+    ) or []
+
+    scored = []
+    seen = set()
+    for item in parsed:
+        bid = item.get("book_id")
+        if bid not in by_id or bid in seen:        # enforce: only real candidates
+            continue
+        seen.add(bid)
+        try:
+            relevance = max(0.0, min(1.0, float(item.get("relevance", 0.0))))
+        except (TypeError, ValueError):
+            relevance = 0.0
+        scored.append(
+            ScoredCandidate(
+                book_id=bid,
+                relevance=round(relevance, 3),
+                reason=str(item.get("reason", "")).strip(),
+                flags=_as_str_list(item.get("flags")),
+            )
+        )
+
+    if not scored:                                 # nothing usable from the model
+        raise RuntimeError("scoring stage returned no usable scores")
+
+    # backfill any candidate the model skipped with a neutral 0 so Stage C still
+    # sees every book (they simply rank last).
+    if len(scored) < len(candidates):
+        for c in candidates:
+            if c["book_id"] not in seen:
+                scored.append(ScoredCandidate(book_id=c["book_id"], relevance=0.0,
+                                              reason="", flags=[]))
+    return scored, True
+
+
+# --- Stage C: final re-rank ----------------------------------------------------
+
+def _rerank_prompt(candidates, scored, intent: Intent, top_k: int) -> str:
+    by_id = {c["book_id"]: c for c in candidates}
+    lines = []
+    for s in scored:
+        c = by_id.get(s.book_id, {})
+        flag_note = f", flags={s.flags}" if s.flags else ""
+        sim_note = (f', similar_to_reader_favorite="{c["similar_to"]}"'
+                    if c.get("similar_to") else "")
+        lines.append(
+            f"[{s.book_id}] \"{c.get('title', '?')}\" by {c.get('authors', '?')} "
+            f"— relevance={s.relevance}, note: {s.reason}{flag_note}{sim_note}"
+        )
+    scored_block = "\n".join(lines)
+    ids = [s.book_id for s in scored]
+    return (
+        "You are the final re-ranking stage of a book recommendation pipeline. "
+        "Using the upstream relevance scores and the reader's intent, choose and "
+        "ORDER the best matches. Each explanation MUST reference the reader's "
+        "intent so the recommendation ties back to the whole conversation.\n\n"
+        f'Reader summary: "{intent.summary}"\n'
+        f"Structured intent: {_intent_block(intent)}\n\n"
+        f"Scored candidates:\n{scored_block}\n\n"
+        f"Instructions:\n"
+        f"- Select and order the {top_k} best matches.\n"
+        f"- Prefer higher relevance; demote anything flagged against intent.avoid.\n"
+        f"- Use ONLY these book_ids: {ids}. Do NOT invent books.\n"
+        "- For each pick, give a neutral one-sentence DESCRIPTION of what the book "
+        "itself is about, plus a one-sentence EXPLANATION of why it earns this rank "
+        "given the reader's intent.\n"
+        "- Make every EXPLANATION distinct and specific to that book — reference its "
+        "own story, tone, author, era, or rating, and how it compares to the other "
+        "picks. Never reuse the same reason or wording across picks.\n"
+        "- Respond with STRICT JSON: a list of objects "
+        '{"book_id": <int>, "description": "<one sentence about the book>", '
+        '"explanation": "<one sentence on why it earns this rank>"} and nothing else.'
+    )
+
+
+def _series_key(title: str) -> str:
+    """Series name from a title like 'X (The Stormlight Archive, #2)' -> the
+    series; '' when the title names no series."""
+    m = re.search(r"\(([^,)]+)", title or "")
+    return m.group(1).strip().lower() if m else ""
+
+
+def _author_key(authors: str) -> str:
+    """First (primary) author, lower-cased, for the diversity cap."""
+    return (authors or "").split(",")[0].strip().lower()
+
+
+def _diversify(picks, top_k: int, max_per_author: int = 2):
+    """Trim an over-long ranked list to ``top_k`` while avoiding monotony:
+    at most ``max_per_author`` books per author and one book per series. Demoted
+    picks are kept as backfill so we always return up to ``top_k`` — diversity
+    never costs us results."""
+    kept, overflow = [], []
+    seen_authors: dict = {}
+    seen_series: set = set()
+    for p in picks:
+        # Apply diversity after ranking so relevance remains the primary signal;
+        # repeated author/series picks are demoted, not discarded.
+        a, s = _author_key(p.authors), _series_key(p.title)
+        if seen_authors.get(a, 0) >= max_per_author or (s and s in seen_series):
+            overflow.append(p)
+            continue
+        kept.append(p)
+        seen_authors[a] = seen_authors.get(a, 0) + 1
+        if s:
+            seen_series.add(s)
+        if len(kept) >= top_k:
+            break
+    for p in overflow:                              # backfill if caps left us short
+        if len(kept) >= top_k:
+            break
+        kept.append(p)
+    return kept[:top_k]
+
+
+def rerank_with_intent(candidates, scored, intent: Intent, top_k: int = 5, *,
+                       model: str = DEFAULT_MODEL):
+    """Stage C (LLM-only). Returns ``(list[RerankedPick], True)``. Raises on LLM failure."""
+    if not scored:
+        return [], True
+
+    by_id = {c["book_id"]: c for c in candidates}
+
+    parsed = llm_rerank._structured(
+        _rerank_prompt(candidates, scored, intent, top_k),
+        llm_rerank.RERANK_LIST_SCHEMA, model, is_list=True,
+        system=llm_rerank.PERSONA,
+    ) or []
+
+    picks = []
+    seen = set()
+    for item in parsed:
+        bid = item.get("book_id")
+        if bid not in by_id or bid in seen:        # enforce: only real candidates
+            continue
+        seen.add(bid)
+        c = by_id[bid]
+        # use the model's description when present; otherwise synthesize from metadata
+        desc = str(item.get("description", "")).strip() or _describe_book(c)
+        picks.append(
+            RerankedPick(
+                book_id=bid,
+                title=c.get("title", ""),
+                authors=c.get("authors", ""),
+                explanation=str(item.get("explanation", "")).strip(),
+                description=desc,
+            )
+        )
+        if len(picks) >= top_k:
+            break
+
+    if not picks:                                  # model returned nothing usable
+        raise RuntimeError("re-rank stage returned no usable picks")
+    return picks, True
+
+
+# --- orchestrator --------------------------------------------------------------
+
+
+def run_pipeline(user_turns, candidates, top_k: int = 5, *,
+                 model: str = DEFAULT_MODEL,
+                 rounds_asked: int = 0,
+                 skip_clarify: bool = False,
+                 max_clarify_rounds: int = MAX_CLARIFY_ROUNDS) -> PipelineResult:
+    """Run the sequential DAG: extract_intent → [clarify?] → score → rerank.
+
+    Parameters
+    ----------
+    user_turns : ordered list of the reader's chat messages (strings). The first
+        is the base request; later turns are refinements.
+    candidates : the CF Top-N as dicts (see ``llm_rerank.candidates_from_recs``).
+    top_k : how many final picks to return.
+    rounds_asked : how many clarifying questions have already been asked this
+        conversation. The gate stops asking once this reaches ``max_clarify_rounds``.
+    skip_clarify : when True, bypass the gate entirely and rank immediately (the
+        "Just recommend something" escape hatch).
+
+    Returns a :class:`PipelineResult`. When the request is too vague the result
+    carries a ``question`` (and empty picks); otherwise it carries the ranked
+    picks. Either way a per-stage trace is included. LLM-only: if a stage's
+    Gemini call fails, this raises and the caller surfaces an error turn.
+    """
+    # Stage A
+    # Every run starts by converting the free-form chat history into structured
+    # facets; later stages only consume this structured contract.
+    intent, used_a = extract_intent(user_turns, model=model)
+    trace = [
+        StageTrace(
+            name="Intent",
+            used_llm=used_a,
+            output={
+                "mood": intent.mood,
+                "genres": intent.genres,
+                "themes": intent.themes,
+                "pace": intent.pace,
+                "avoid": intent.avoid,
+                "recency": intent.recency,
+                "summary": intent.summary,
+            },
+            note="We read your message and pulled out the details that matter.",
+        )
+    ]
+
+    # Clarify gate: if the request is too thin, ask one question and stop here.
+    specificity = _intent_specificity(intent)
+    should_ask = not skip_clarify and needs_clarification(
+        intent, rounds_asked, max_clarify_rounds
+    )
+    if should_ask:
+        question, used_gate = build_clarifying_question(intent, model=model)
+        trace.append(
+            StageTrace(
+                name="Clarify",
+                used_llm=used_gate,
+                output={
+                    "specificity": specificity,
+                    "threshold": CLARIFY_MIN_SIGNALS,
+                    "round": rounds_asked + 1,
+                    "max_rounds": max_clarify_rounds,
+                    "question": question.prompt,
+                    "options": question.options,
+                },
+                note=(
+                    "Your request was still a little open-ended, so we asked a "
+                    "quick question to narrow things down before recommending "
+                    f"(question {rounds_asked + 1} of up to {max_clarify_rounds})."
+                ),
+            )
+        )
+        return PipelineResult(
+            picks=[],
+            intent=intent,
+            scored=[],
+            used_llm=True,
+            trace=trace,
+            source=f"Gemini · {model} · paused for clarification",
+            question=question,
+        )
+
+    # Gate passed — record why we're proceeding straight to ranking.
+    if skip_clarify:
+        gate_note = "You asked to skip ahead, so we went straight to picking books."
+    elif rounds_asked >= max_clarify_rounds:
+        gate_note = (
+            "We'd already asked a couple of questions, so we went ahead and "
+            "recommended with what we knew."
+        )
+    else:
+        gate_note = (
+            "Your request was clear enough to act on, so we went straight to "
+            "picking books — no need to ask anything."
+        )
+    trace.append(
+        StageTrace(
+            name="Clarify",
+            used_llm=False,
+            output={
+                "specificity": specificity,
+                "threshold": CLARIFY_MIN_SIGNALS,
+                "asked": False,
+                "skipped": bool(skip_clarify),
+            },
+            note=gate_note,
+        )
+    )
+
+    # Stage B
+    scored, used_b = score_candidates(candidates, intent, model=model)
+    title_by_id = {c["book_id"]: c.get("title", "") for c in candidates}
+    top_scored = sorted(scored, key=lambda s: s.relevance, reverse=True)[:6]
+    trace.append(
+        StageTrace(
+            name="Scoring",
+            used_llm=used_b,
+            output={
+                "scored": [
+                    {
+                        "book_id": s.book_id,
+                        "title": title_by_id.get(s.book_id, ""),
+                        "relevance": s.relevance,
+                        "reason": s.reason,
+                        "flags": s.flags,
+                    }
+                    for s in top_scored
+                ],
+                "count": len(scored),
+            },
+            note=f"We rated all {len(scored)} books on how well they fit what you "
+                 f"asked for. Here are the strongest matches.",
+        )
+    )
+
+    # Stage C — fetch a few extra picks so the diversity pass has room to drop
+    # same-author / same-series clusters without falling short of top_k.
+    fetch_k = min(len(candidates), top_k + 3)
+    picks, used_c = rerank_with_intent(
+        candidates, scored, intent, top_k=fetch_k, model=model,
+    )
+    picks = _diversify(picks, top_k)
+    trace.append(
+        StageTrace(
+            name="Re-rank",
+            used_llm=used_c,
+            output={
+                "picks": [
+                    {"book_id": p.book_id, "title": p.title,
+                     "description": p.description, "explanation": p.explanation}
+                    for p in picks
+                ]
+            },
+            note="We put the best matches in order and wrote a short reason for "
+                 "each one.",
+        )
+    )
+
+    return PipelineResult(
+        picks=picks,
+        intent=intent,
+        scored=scored,
+        used_llm=True,
+        trace=trace,
+        source=f"Gemini · {model} · 3-stage DAG",
+    )
+
+
+# ===== inlined from src/recommend.py =====
+import pandas as pd
+
+
+def popular_books(ratings: pd.DataFrame, min_ratings: int = 20) -> set:
+    # Popularity support filter keeps the first-pass CF list away from books
+    # whose scores are based on too little observed feedback.
+    counts = ratings["book_id"].value_counts()
+    return set(counts[counts >= min_ratings].index)
+
+
+def recommend_top_n(user_id, hybrid, ratings: pd.DataFrame, books: pd.DataFrame,
+                    top_n: int = 10, min_ratings: int = 20,
+                    allowed_book_ids=None) -> pd.DataFrame:
+    """Return a DataFrame of the user's top-N recommended books.
+
+    allowed_book_ids: optional set of book_ids to restrict candidates to (e.g. an
+    author/decade/genre filter). When None (default) no restriction is applied and
+    behavior is identical to before. When an empty set, no candidates remain.
+    """
+    seen = set(ratings.loc[ratings["user_id"] == user_id, "book_id"])
+    pop = popular_books(ratings, min_ratings)
+    # Candidate universe: unseen books, narrowed by the UI filter FIRST so the
+    # popularity floor is applied within the user's selection — not the whole
+    # catalog. Applying the filter last (as before) let a narrow author/decade
+    # pick collapse to zero whenever none of its books cleared the global
+    # popularity floor, which looked like the filter "not working".
+    unseen = [b for b in books["book_id"] if b not in seen]
+    if allowed_book_ids is not None:
+        unseen = [b for b in unseen if b in allowed_book_ids]
+    candidates = [b for b in unseen if b in pop]
+    if not candidates:                          # nothing popular enough — relax
+        candidates = unseen                     # the floor rather than return []
+
+    user_ratings = ratings[ratings["user_id"] == user_id]
+    scores = hybrid.score(user_id, user_ratings, candidates)
+    top = scores.sort_values(ascending=False).head(top_n)
+
+    title_of = dict(zip(books["book_id"], books["title"]))
+    author_of = dict(zip(books["book_id"], books["authors"]))
+    rows = []
+    for book_id, sc in top.items():
+        # Build a display-ready row here so app/notebook callers do not each
+        # need to repeat title/author joins.
+        row = {"book_id": book_id, "title": title_of.get(book_id, "?"),
+               "authors": author_of.get(book_id, "?"), "score": round(float(sc), 4)}
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ===== end inlined source =====
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(_APP_DIR, ".env"))
@@ -38,15 +1247,9 @@ if not os.environ.get("GEMINI_API_KEY"):
     except Exception:
         pass
 
-sys.path.insert(0, _APP_DIR)
-
-from src import data_loader, llm_rerank, rag_pipeline, recommend  # noqa: E402
-from src.cf_model import PopularityModel  # noqa: E402
 
 try:
-    from src import cf_model
-
-    cf_model._require_surprise()
+    _require_surprise()
     HAVE_SURPRISE = True
 except Exception:
     HAVE_SURPRISE = False
@@ -60,20 +1263,14 @@ st.set_page_config(
 
 DEFAULT_K = 10
 DEFAULT_UBCF_K = 25       # SHIPPED: best memory-light model (UBCF pearson_baseline)
-DEFAULT_IBCF_K = 9        # absolute-best metrics but ~815MB peak — needs more RAM than free tier
 DEFAULT_MIN_RATINGS = 20
-RANDOM_STATE = 6604
 BEST_SIM = "pearson_baseline"   # similarity that won the corrected audit
 
 SOURCE_REAL = "Real dataset"
-SOURCE_SAMPLE = "Synthetic sample"
 
 MODEL_LABELS = {
     "ubcf": "User-based CF",
     "ibcf": "Item-based CF",
-    "baseline": "Baseline means",
-    "svd": "SVD",
-    "popularity": "Popularity",
 }
 
 
@@ -783,34 +1980,6 @@ def inject_css() -> None:
             color: var(--muted);
             font-size: 0.74rem;
             margin-top: 0.9rem;
-        }
-
-        /* Visible notice when a reply came from the rule-based fallback rather
-           than live LLM re-ranking (e.g. Gemini quota hit). */
-        .fallback-note {
-            align-items: center;
-            background: #f6e7d0;
-            border: 1px solid #e6c79a;
-            border-radius: 10px;
-            color: #8a3f12;
-            display: flex;
-            font-size: 0.82rem;
-            gap: 0.55rem;
-            line-height: 1.45;
-            margin: 0.55rem 0 0.2rem;
-            padding: 0.55rem 0.75rem;
-        }
-
-        .fallback-note-badge {
-            background: #8a3f12;
-            border-radius: 999px;
-            color: #fbf6ec;
-            flex: 0 0 auto;
-            font-size: 0.66rem;
-            font-weight: 760;
-            letter-spacing: 0.04em;
-            padding: 0.16rem 0.5rem;
-            text-transform: uppercase;
         }
 
         .thinking {
@@ -1610,40 +2779,6 @@ def inject_css() -> None:
             font-weight: 600;
         }
 
-        .stage-badge {
-            align-items: center;
-            border-radius: 999px;
-            display: inline-flex;
-            font-size: 0.66rem;
-            font-weight: 740;
-            gap: 0.34rem;
-            letter-spacing: 0.03em;
-            padding: 0.22rem 0.58rem;
-            text-transform: uppercase;
-        }
-
-        .stage-badge .status-dot {
-            box-shadow: none;
-        }
-
-        .stage-badge--live {
-            background: var(--accent-soft);
-            color: var(--accent);
-        }
-
-        .stage-badge--live .status-dot {
-            background: var(--accent);
-        }
-
-        .stage-badge--heuristic {
-            background: var(--surface-soft);
-            color: var(--muted);
-        }
-
-        .stage-badge--heuristic .status-dot {
-            background: var(--muted);
-        }
-
         .trace-note {
             color: #6b5d48;
             font-size: 0.84rem;
@@ -1951,7 +3086,7 @@ def model_label(kind: str) -> str:
 
 
 # Small display-formatting helpers keep HTML rendering defensive: app data may
-# include None/NaN values from CSVs or synthetic sample frames.
+# include None/NaN values from CSVs.
 def safe_text(value, fallback: str = "") -> str:
     if value is None:
         return fallback
@@ -1994,8 +3129,8 @@ def render_recommendation_cards(recs, books) -> None:
         "ratings_count",
     ]
     # Pull the cover-image link straight from the catalog when present (the
-    # assignment dataset ships Goodreads `small_image_url`/`image_url`; the
-    # synthetic sample has neither, so we fall back to a placeholder tile).
+    # assignment dataset ships Goodreads `small_image_url`/`image_url`; books
+    # without one fall back to a placeholder tile).
     for col in ("small_image_url", "image_url"):
         if col in books.columns and col not in meta_cols:
             meta_cols.append(col)
@@ -2206,8 +3341,7 @@ def render_reasoning_trace(trace) -> str:
 
     `trace` is a list of asdict() rag_pipeline.StageTrace dicts. Native HTML
     <details>, so it works inside st.markdown with no JS. Returns "" when absent.
-    Written for a non-technical reader: numbered steps, plain notes, and an
-    "AI" vs "Smart rules" badge instead of LLM jargon.
+    Written for a non-technical reader: numbered steps with plain-language notes.
     """
     if not trace:
         return ""
@@ -2215,9 +3349,6 @@ def render_reasoning_trace(trace) -> str:
     for i, stage in enumerate(trace, start=1):
         raw_name = safe_text(stage.get("name"), "Stage")
         name = TRACE_STEP_NAMES.get(raw_name, raw_name)
-        used_llm = bool(stage.get("used_llm"))
-        badge_cls = "stage-badge--live" if used_llm else "stage-badge--heuristic"
-        badge_text = "AI" if used_llm else "Smart rules"
         note = escape(safe_text(stage.get("note")))
         body = _trace_output_summary(name, stage.get("output") or {})
         body_html = f'<div class="trace-body">{body}</div>' if body else ""
@@ -2226,8 +3357,6 @@ def render_reasoning_trace(trace) -> str:
             f'<div class="trace-stage-head">'
             f'<span class="trace-step-no">{i}</span>'
             f'<span class="trace-stage-name">{escape(name)}</span>'
-            f'<span class="stage-badge {badge_cls}">'
-            f'<span class="status-dot"></span>{badge_text}</span>'
             f'</div>'
             f'<div class="trace-note">{note}</div>'
             f'{body_html}'
@@ -2241,56 +3370,6 @@ def render_reasoning_trace(trace) -> str:
         f'message to this shortlist.</div>'
         f'<div class="trace-stages">' + "".join(stages) + '</div>'
         f'</details>'
-    )
-
-
-def _turn_is_llm(message) -> bool:
-    """True if the live LLM produced the visible content of this assistant turn.
-
-    For a recommendations turn the picks' descriptions/explanations come from the
-    Re-rank stage, so that stage's flag is the honest signal (a turn can have an
-    LLM intent step but a heuristic re-rank if quota runs out mid-turn). If the
-    stage is missing we fall back to the turn-level used_llm. For a clarify turn
-    (just a question) the turn-level flag is what matters.
-    """
-    if message.get("kind") != "clarify":
-        # Recommendation turns can be mixed-mode; inspect the final Re-rank stage
-        # because that is what produced the visible prose and ordering.
-        for stage in (message.get("trace") or []):
-            if stage.get("name") == "Re-rank":
-                return bool(stage.get("used_llm"))
-    return bool(message.get("used_llm"))
-
-
-def _fallback_notice(message) -> str:
-    """A visible banner shown when a reply was served by the rule-based fallback
-    instead of live LLM re-ranking, so heuristic results are never silently
-    mistaken for AI ones. Returns "" when the LLM produced the turn."""
-    if _turn_is_llm(message):
-        return ""
-    if HAVE_GEMINI_KEY and HAVE_GEMINI_SDK:
-        # Key + SDK are present, so the call itself failed — almost always the
-        # Gemini free-tier rate limit / quota, sometimes a transient network error.
-        text = (
-            "Live AI re-ranking was unavailable for this reply (usually the Gemini "
-            "free-tier rate limit) — these results use BookRec’s built-in rule-based "
-            "ranking instead."
-        )
-    elif HAVE_GEMINI_KEY and not HAVE_GEMINI_SDK:
-        text = (
-            "The Gemini SDK isn’t installed, so this reply uses BookRec’s built-in "
-            "rule-based ranking. Install google-genai to enable live AI re-ranking."
-        )
-    else:
-        text = (
-            "Live AI re-ranking isn’t configured, so this reply uses BookRec’s "
-            "built-in rule-based ranking. Set a GEMINI_API_KEY to enable it."
-        )
-    return (
-        '<div class="fallback-note">'
-        '<span class="fallback-note-badge">Rule-based</span>'
-        f'<span>{escape(text)}</span>'
-        '</div>'
     )
 
 
@@ -2310,7 +3389,6 @@ def render_clarify_message(message) -> str:
         '<div class="assistant-avatar">B</div>',
         '<div class="assistant-body">',
         '<div class="assistant-name">BookRec</div>',
-        _fallback_notice(message),
         f'<div class="assistant-lead">{question}</div>',
         render_intent_chips(intent),
         '<div class="clarify-hint">Tap one of the suggested answers, type your own, '
@@ -2340,12 +3418,17 @@ def _goodreads_url(cover_url, title, authors):
 
 
 @st.cache_data
-def book_media_lookup(books):
+def book_media_lookup(source, _books):
     """Map book_id -> {"cover": <url or "">, "url": <goodreads link>}.
 
     Lets the chat pick cards show the same cover thumbnail (from the catalog's
     image link) and link out to Goodreads, working from just the pick's book_id.
+
+    Cached by `source` (a cheap string key); the catalog is passed as `_books`
+    (underscore -> excluded from the cache key) so Streamlit never re-hashes the
+    full ~10k-row frame on every rerun.
     """
+    books = _books
     cover_col = next(
         (c for c in ("small_image_url", "image_url") if c in books.columns), None
     )
@@ -2385,7 +3468,6 @@ def render_assistant_message(message, book_meta=None) -> str:
         '<div class="assistant-avatar">B</div>',
         '<div class="assistant-body">',
         '<div class="assistant-name">BookRec</div>',
-        _fallback_notice(message),
         f'<div class="assistant-lead">{lead}</div>',
         render_intent_chips(intent),
         '<div class="pick-list">',
@@ -2490,30 +3572,40 @@ def render_chat_thread(messages, pending: bool = False, book_meta=None) -> None:
 def load_data(source: str):
     # Data frames are pure inputs to the rest of the app, so cache by selected
     # source and reuse across reruns triggered by UI interactions.
-    if source == SOURCE_SAMPLE:
-        return data_loader.load_sample()
     # Absolute path so the app works regardless of the working directory — on
     # hosted platforms (e.g. Streamlit Community Cloud) the CWD is the repo root,
     # not this folder, so a bare "data" would not resolve.
-    return data_loader.load(os.path.join(_APP_DIR, "data"))
+    return load(os.path.join(_APP_DIR, "data"))
 
 
-def auto_reader(ratings):
+@st.cache_data
+def auto_reader(source, _ratings):
     """Pick a sensible default reader for UBCF: the most active rater.
 
     Reader selection is exposed in the app, and the automatic choice defaults to
-    the reader with the richest history so UBCF has the most signal.
+    the reader with the richest history so UBCF has the most signal. Cached by
+    `source` so the value_counts() over ~165k ratings runs once, not every rerun.
     """
+    ratings = _ratings
     return ratings["user_id"].value_counts().idxmax()
 
 
-def _split_values(series):
-    """Yield individual comma-split, stripped values from a string column."""
-    for cell in series.dropna():
-        for part in str(cell).split(","):
-            value = part.strip()
-            if value:
-                yield value
+# Upper bound on how many reader ids the picker lists. The assignment catalog has
+# ~1.2k users (all shown); the cap only guards against an unwieldy dropdown on a
+# much larger dataset, and when it bites we say so in the help text rather than
+# truncating silently.
+READER_OPTIONS_MAX = 2000
+
+
+@st.cache_data
+def reader_options(source, _ratings):
+    """(sorted user ids for the picker, truncated?) — cached by `source`.
+
+    Sorted numerically so a specific id is easy to find; the value_counts/sort
+    runs once per source instead of on every rerun.
+    """
+    ids = sorted(_ratings["user_id"].unique().tolist())
+    return ids[:READER_OPTIONS_MAX], len(ids) > READER_OPTIONS_MAX
 
 
 # An author needs at least this many books in the catalog to appear in the
@@ -2528,15 +3620,19 @@ TOP_AUTHORS = 50
 
 
 @st.cache_data
-def author_options(books):
+def author_options(source, _books):
     """The TOP_AUTHORS most popular authors with enough books to seed a candidate list.
 
     Keeps authors with at least MIN_AUTHOR_BOOKS titles in the catalog, ranks
     them by total ratings (most popular first), and returns the top TOP_AUTHORS.
     Authors with only a handful of titles are dropped — selecting one would yield
     a candidate pool too small to re-rank. Falls back to every named author when
-    nothing clears the threshold (e.g. the small synthetic sample).
+    nothing clears the threshold (e.g. a tiny catalog).
+
+    Cached by `source`; `_books` is excluded from the cache key (underscore) so
+    the frame isn't re-hashed every rerun.
     """
+    books = _books
     if "authors" not in books.columns:
         return []
     exploded = books.assign(
@@ -2572,7 +3668,7 @@ MIN_DECADE_BOOKS = 50
 
 
 @st.cache_data
-def decade_options(books):
+def decade_options(source, _books):
     """Decade labels for the filter — individual recent decades, sparse old ones binned.
 
     Decades with enough books (>= MIN_DECADE_BOOKS) are listed individually
@@ -2580,8 +3676,9 @@ def decade_options(books):
     single "Before <cutoff>s" option (cutoff = the first dense decade), so any
     selected period always has enough candidates for the collaborative filter.
     Falls back to listing every decade when there is no meaningful split (e.g.
-    the small synthetic sample).
+    a tiny catalog). Cached by `source`; `_books` excluded from key.
     """
+    books = _books
     years = pd.to_numeric(
         books.get("original_publication_year", pd.Series(dtype=float)),
         errors="coerce",
@@ -2599,17 +3696,8 @@ def decade_options(books):
     return [f"Before {cutoff}s"] + [f"{d}s" for d in decades if d >= cutoff]
 
 
-@st.cache_data
-def genre_options(books):
-    """Sorted unique genres (comma-split) if a non-empty `genre` column exists, else []."""
-    if "genre" not in books.columns:
-        return []
-    genres = {g for g in _split_values(books["genre"]) if g}
-    return sorted(genres)
-
-
-def filter_book_ids(books, authors=None, decades=None, genres=None):
-    """Restrict the catalog by author/decade/genre.
+def filter_book_ids(books, authors=None, decades=None):
+    """Restrict the catalog by author/decade.
 
     Returns None when nothing is selected (a true no-op for the caller). When any
     group is active, builds a vectorized boolean mask: AND across active groups,
@@ -2618,8 +3706,7 @@ def filter_book_ids(books, authors=None, decades=None, genres=None):
     """
     authors = authors or []
     decades = decades or []
-    genres = genres or []
-    if not authors and not decades and not genres:
+    if not authors and not decades:
         return None
 
     mask = pd.Series(True, index=books.index)
@@ -2660,26 +3747,16 @@ def filter_book_ids(books, authors=None, decades=None, genres=None):
             decade_mask = decade_mask | ((years > 0) & (years < before_cutoff))
         mask &= decade_mask
 
-    if genres and "genre" in books.columns:
-        wanted_genres = set(genres)
-        genre_mask = books["genre"].fillna("").apply(
-            lambda cell: any(
-                part.strip() in wanted_genres for part in str(cell).split(",")
-            )
-        )
-        mask &= genre_mask
-
     return set(books.loc[mask, "book_id"])
 
 
 @st.cache_resource
 def build_model(source: str, kind: str, k: int = DEFAULT_K, sim_name: str | None = None):
     # Model objects are heavier and mutable, so cache as resources rather than
-    # serializing them through st.cache_data.
+    # serializing them through st.cache_data. scikit-surprise is required (the
+    # main flow stops earlier with a clear message if it is unavailable).
     ratings, _ = load_data(source)
-    if kind == "popularity" or not HAVE_SURPRISE:
-        return PopularityModel().fit(ratings)
-    return cf_model.CFModel(kind=kind, k=k, sim_name=sim_name).fit(ratings)
+    return CFModel(kind=kind, k=k, sim_name=sim_name).fit(ratings)
 
 
 @st.cache_resource
@@ -2688,17 +3765,16 @@ def build_content_model(source: str):
     for each CF candidate we find the reader's own highly-rated book it most
     resembles. Cached so it's fit once per data source."""
     _, books = load_data(source)
-    from src.content_model import ContentModel
 
     b = books.copy()
     if "tags" not in b.columns:  # the assignment catalog has no shelf tags
         b["tags"] = ""
-    return ContentModel(backend="tfidf").fit(b)
+    return ContentModel().fit(b)
 
 
 def compute_grounding(source, uid, ratings, books, cand_ids):
     """Map each candidate book_id -> the title of the reader's most content-similar
-    favorite, for grounding the LLM/heuristic explanations. Never raises."""
+    favorite, for grounding the LLM re-ranker's explanations. Never raises."""
     try:
         cm = build_content_model(source)
         liked = ratings.loc[
@@ -2716,8 +3792,6 @@ def compute_grounding(source, uid, ratings, books, cand_ids):
 
 class ScoreAdapter:
     """Wrap any model so recommend_top_n can call .score(...)."""
-
-    content = None
 
     def __init__(self, model):
         self.model = model
@@ -2759,7 +3833,7 @@ def resolve_pending_chat(books) -> None:
     # gate stops asking once it hits the pipeline's max-rounds cap.
     rounds_asked = sum(1 for m in messages if m.get("kind") == "clarify")
 
-    cands = llm_rerank.candidates_from_recs(recs, books)
+    cands = candidates_from_recs(recs, books)
     # Attach content-similarity grounding so the re-ranker can tie a pick to a
     # book this reader already loved ("in the spirit of X").
     grounding = st.session_state.get("grounding") or {}
@@ -2767,13 +3841,36 @@ def resolve_pending_chat(books) -> None:
         sim = grounding.get(c["book_id"])
         if sim:
             c["similar_to"] = sim
-    result = rag_pipeline.run_pipeline(
-        user_turns,
-        cands,
-        top_k=pending["top_k"],
-        rounds_asked=rounds_asked,
-        skip_clarify=pending.get("skip_clarify", False),
-    )
+    try:
+        result = run_pipeline(
+            user_turns,
+            cands,
+            top_k=pending["top_k"],
+            rounds_asked=rounds_asked,
+            skip_clarify=pending.get("skip_clarify", False),
+        )
+    except Exception as exc:  # noqa: BLE001 — last-resort UI guard
+        # LLM-only pipeline: a raise here means the Gemini call failed (commonly
+        # the free-tier rate limit) after retries. Keep the app alive and show an
+        # honest turn rather than a traceback (queued turn already cleared above).
+        messages.append(
+            {
+                "role": "assistant",
+                "kind": "recommend",
+                "picks": [],
+                "source": "error",
+                "used_llm": False,
+                "refine": len(user_turns) > 1,
+                "pref": user_turns[-1],
+                "intent": {
+                    "summary": "The AI re-ranker is temporarily unavailable "
+                    "(often the Gemini rate limit). Please wait a moment and try "
+                    "again."
+                },
+                "trace": [],
+            }
+        )
+        return
 
     if result.question is not None:
         messages.append(
@@ -2811,20 +3908,21 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     # Either Gemini SDK enables the live LLM layer: the new google-genai
     # (preferred — structured output) or the legacy google-generativeai.
-    HAVE_GEMINI_SDK = llm_rerank._sdk_available()
+    HAVE_GEMINI_SDK = _sdk_available()
 
 HAVE_GEMINI_KEY = bool(os.environ.get("GEMINI_API_KEY"))
+# The chat re-ranker is LLM-only — both a key and the SDK are required for it.
+HAVE_LLM = HAVE_GEMINI_KEY and HAVE_GEMINI_SDK
 
-# Compact runtime health badge for the fixed nav: it tells the reader whether
-# recommendations are CF-backed, Gemini-backed, or running in fallback mode.
+# Compact runtime health badge for the fixed nav.
 if not HAVE_SURPRISE:
-    nav_status = "Popularity mode"
-elif HAVE_GEMINI_KEY and HAVE_GEMINI_SDK:
+    nav_status = "Engine unavailable"
+elif HAVE_LLM:
     nav_status = "Gemini ready"
 elif HAVE_GEMINI_KEY:
     nav_status = "SDK missing"
 else:
-    nav_status = "Fallback mode"
+    nav_status = "Gemini key required"
 
 st.markdown(
     '<nav class="floating-nav" aria-label="BookRec sections">'
@@ -2944,12 +4042,22 @@ with st.container(border=True):
     # we reserve their row here and fill it after the data has loaded below.
     base_filters = st.container()
 
+    # Collaborative filtering needs scikit-surprise. It's a hard requirement now
+    # (only UBCF/IBCF are supported — no non-personalized fallback), so stop with
+    # a clear message rather than erroring deeper if the wheel didn't install.
+    if not HAVE_SURPRISE:
+        st.error(
+            "This app needs **scikit-surprise** for collaborative filtering, but "
+            "it isn't installed. Install it (`pip install scikit-surprise`, with "
+            "NumPy < 2.0) and reload."
+        )
+        st.stop()
+
     # Model and tuning are fixed to the validated optimal configuration — no UI
     # knobs. We ship UBCF (user-based, pearson_baseline, k=25): the best
     # MEMORY-LIGHT model in the corrected Top-N audit and the top user-based
     # config on the held-out test (Precision@10 0.6953 / F1 0.745; see
     # notebooks/precision_at_k_corrected.ipynb cell 46 and scripts/run_cf_bakeoff.py).
-    # We fall back to the popularity model only if scikit-surprise is unavailable.
     # The chat re-ranks these candidates on top.
     #
     # Why not IBCF: item-based pearson_baseline scored marginally higher offline
@@ -2958,9 +4066,9 @@ with st.container(border=True):
     # Streamlit Community Cloud's free tier on the first candidate build. The
     # ranking-quality gap is ~0.001 F1 (imperceptible to the top-N the app shows).
     # If you deploy on a host with more RAM and want the absolute-best metrics,
-    # switch the two lines below to:  cf_kind = "ibcf";  k_neighbors = DEFAULT_IBCF_K (9).
+    # switch the two lines below to:  cf_kind = "ibcf";  k_neighbors = 9.
     source = SOURCE_REAL
-    cf_kind = "ubcf" if HAVE_SURPRISE else "popularity"
+    cf_kind = "ubcf"
     cf_sim = BEST_SIM
     k_neighbors = DEFAULT_UBCF_K
     top_n = 10
@@ -2970,22 +4078,31 @@ with st.container(border=True):
         ratings, books = load_data(source)
 
     # UBCF needs a user; default to the most active reader unless overridden.
-    auto_uid = auto_reader(ratings)
-    author_opts = author_options(books)
-    decade_opts = decade_options(books)
-    genre_opts = genre_options(books)
+    # These helpers are cached by `source` (cheap key) and take the frame as an
+    # underscore arg, so they don't re-hash the full catalog on every rerun.
+    auto_uid = auto_reader(source, ratings)
+    author_opts = author_options(source, books)
+    decade_opts = decade_options(source, books)
 
     # Reader selection is a primary control (the assignment asks the app to let a
     # user be selected) — it sits up front with the author/decade filters.
     with base_filters:
         reader_col, author_col, decade_col = st.columns(3)
         with reader_col:
+            reader_ids, readers_truncated = reader_options(source, ratings)
+            reader_help = (
+                "The user the collaborative filter personalizes for. Auto uses "
+                "the most active reader; the chat refines on top of these "
+                "candidates."
+            )
+            if readers_truncated:
+                reader_help += (
+                    f" Showing the first {READER_OPTIONS_MAX:,} reader ids."
+                )
             reader_choice = st.selectbox(
                 "Reader (user to recommend for)",
-                ["Auto (most active)"] + sorted(ratings["user_id"].unique())[:1000],
-                help="The user the collaborative filter personalizes for. Auto uses "
-                     "the most active reader; the chat refines on top of these "
-                     "candidates.",
+                ["Auto (most active)"] + reader_ids,
+                help=reader_help,
                 key="reader_override",
             )
         with author_col:
@@ -2999,20 +4116,15 @@ with st.container(border=True):
             )
         with decade_col:
             sel_decades = st.multiselect("Decades", decade_opts, key="filt_decades")
-        # Genre stays hidden until genre data exists (genre_opts is empty today).
-        sel_genres = []
-        if genre_opts:
-            sel_genres = st.multiselect("Genres", genre_opts, key="filt_genres")
 
     uid = auto_uid if str(reader_choice).startswith("Auto") else reader_choice
-    allowed_book_ids = filter_book_ids(books, sel_authors, sel_decades, sel_genres)
+    allowed_book_ids = filter_book_ids(books, sel_authors, sel_decades)
 
     # Model/tuning are now constant, so only the reader + filters drive a rebuild.
     current_config = (
         uid,
         tuple(sorted(sel_authors)),
         tuple(sorted(sel_decades)),
-        tuple(sorted(sel_genres)),
     )
     if st.session_state.get("rec_config") != current_config:
         st.session_state["cf_recs"] = None
@@ -3027,8 +4139,6 @@ with st.container(border=True):
         filter_pills += (
             f'<span class="pill">{escape(", ".join(sel_decades))}</span>'
         )
-    if sel_genres:
-        filter_pills += f'<span class="pill">{len(sel_genres)} genre(s)</span>'
     if filter_pills:
         st.markdown(
             f'<div class="pill-row">{filter_pills}</div>',
@@ -3039,14 +4149,13 @@ with st.container(border=True):
         with st.spinner("Scoring the catalog..."):
             model = build_model(source, cf_kind, k=k_neighbors, sim_name=cf_sim)
             scorer = ScoreAdapter(model)
-            st.session_state["cf_recs"] = recommend.recommend_top_n(
+            st.session_state["cf_recs"] = recommend_top_n(
                 uid,
                 scorer,
                 ratings,
                 books,
                 top_n=top_n,
                 min_ratings=min_ratings,
-                explain=False,
                 allowed_book_ids=allowed_book_ids,
             )
             st.session_state["rec_config"] = current_config
@@ -3117,7 +4226,7 @@ with st.container(key="chat_stage"):
 
     if refining:
         render_chat_thread(
-            messages, pending=pending, book_meta=book_media_lookup(books)
+            messages, pending=pending, book_meta=book_media_lookup(source, books)
         )
     else:
         st.markdown(
@@ -3136,8 +4245,21 @@ with st.container(key="chat_stage"):
             'can re-rank real books.</div>',
             unsafe_allow_html=True,
         )
+    elif not HAVE_LLM:
+        # The chat re-ranker is LLM-only; without Gemini there is no fallback.
+        msg = (
+            "Set a <strong>GEMINI_API_KEY</strong> to enable the AI re-ranker."
+            if not HAVE_GEMINI_KEY
+            else "The Gemini SDK isn’t installed — run "
+                 "<code>pip install google-genai</code> to enable the AI re-ranker."
+        )
+        st.markdown(
+            f'<div class="chat-lock">{msg} The chat is powered only by the live '
+            'LLM — there is no rule-based fallback.</div>',
+            unsafe_allow_html=True,
+        )
 
-    composer_disabled = pending or not has_recs
+    composer_disabled = pending or not has_recs or not HAVE_LLM
 
     # Picks count (Depth control). Read from session_state so it's available
     # BEFORE the selectbox is re-instantiated below — the clarify answer chips,
@@ -3162,11 +4284,13 @@ with st.container(key="chat_stage"):
             )
             if clarify_options:
                 chip_cols = st.columns(len(clarify_options), gap="small")
-                for col, option in zip(chip_cols, clarify_options):
+                for idx, (col, option) in enumerate(zip(chip_cols, clarify_options)):
                     with col:
+                        # Key by index, not option text, so duplicate option
+                        # strings can never collide into a DuplicateWidgetID.
                         if st.button(
                             option,
-                            key=f"clarify_opt_{option}",
+                            key=f"clarify_opt_{idx}",
                             disabled=composer_disabled,
                             width="stretch",
                         ):
@@ -3174,7 +4298,10 @@ with st.container(key="chat_stage"):
                             st.rerun()
         skip_cols = st.columns(2, gap="small")
         with skip_cols[0]:
-            if st.button("↻ Start a new chat", width="stretch", disabled=pending):
+            if st.button(
+                "↻ Start a new chat", key="new_chat_clarify",
+                width="stretch", disabled=pending,
+            ):
                 st.session_state["chat_messages"] = []
                 st.session_state["chat_pending"] = None
                 st.session_state["clear_chat_input"] = True
@@ -3247,7 +4374,10 @@ with st.container(key="chat_stage"):
                         st.rerun()
         reset_cols = st.columns([0.62, 0.38])
         with reset_cols[1]:
-            if st.button("↻ Start a new chat", width="stretch", disabled=pending):
+            if st.button(
+                "↻ Start a new chat", key="new_chat_refine",
+                width="stretch", disabled=pending,
+            ):
                 st.session_state["chat_messages"] = []
                 st.session_state["chat_pending"] = None
                 st.session_state["clear_chat_input"] = True
@@ -3262,7 +4392,7 @@ with st.container(key="chat_stage"):
             chip_cols = st.columns(len(starter_chips), gap="medium")
             for col, chip in zip(chip_cols, starter_chips):
                 with col:
-                    if st.button(chip, disabled=not has_recs, width="stretch"):
+                    if st.button(chip, disabled=composer_disabled, width="stretch"):
                         submit_chat_message(chip, personalized_k)
                         st.rerun()
 
