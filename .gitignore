@@ -75,6 +75,9 @@ yarn-error.log*
 *.log
 .cache/
 
+# Local-only archived diagrams (kept on disk, not committed)
+archive/diagrams/
+
 # Optional: large downloaded datasets (uncomment if you add huge files locally)
 # bookrec/data/*.csv
 # *.zip
