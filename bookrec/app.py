@@ -391,7 +391,10 @@ def _to_plain(parsed):
     if isinstance(parsed, Enum):
         return parsed.value
     if hasattr(parsed, "model_dump"):
-        return parsed.model_dump()
+        # mode="json" serializes Enum fields (e.g. _Pace/_Recency) to their string
+        # values ("any") rather than leaving them as enum members, whose str() is
+        # "_Pace.ANY" — that leaked into the UI and falsely tripped the clarify gate.
+        return parsed.model_dump(mode="json")
     return parsed
 
 
