@@ -48,18 +48,33 @@ def _fix_mojibake(s):
 def load(data_dir: str = "data", fix_encoding: bool = True):
     """Primary loader: read the assignment Books.csv + Ratings.csv.
 
-    Reproducible from just those two files. There is no shelf-tags file in this
-    dataset, so an empty `tags` column is added and the content model falls back
-    to title + authors. Returns (ratings, books) in the package contract.
+    Reproducible from just those two files. We look for them in ``data_dir``
+    first, then fall back to the project root (data_dir's parent/grandparent) and
+    the current working directory — so the CSVs work whether they live in
+    ``bookrec/data/`` or are dropped in the repo root. There is no shelf-tags
+    file in this dataset, so an empty `tags` column is added. Returns
+    (ratings, books) in the package contract.
     """
+    # Candidate folders to search, in priority order (deduped, keeping order).
+    _candidates = []
+    for d in (data_dir,
+              os.path.dirname(data_dir),                 # e.g. bookrec/
+              os.path.dirname(os.path.dirname(data_dir)),  # e.g. repo root
+              os.getcwd()):
+        if d and d not in _candidates:
+            _candidates.append(d)
+
     def _path(name):
-        p = os.path.join(data_dir, name)
-        if not os.path.exists(p):
-            raise FileNotFoundError(
-                f"Could not find {name} in {data_dir!r}. "
-                f"Place Books.csv and Ratings.csv there (see bookrec/data/README.md)."
-            )
-        return p
+        for d in _candidates:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                return p
+        searched = ", ".join(repr(d) for d in _candidates)
+        raise FileNotFoundError(
+            f"Could not find {name}. Looked in: {searched}. "
+            f"Place Books.csv and Ratings.csv in one of these (e.g. bookrec/data/ "
+            f"or the repo root)."
+        )
 
     books = pd.read_csv(_path("Books.csv"))
     ratings = pd.read_csv(_path("Ratings.csv"))
